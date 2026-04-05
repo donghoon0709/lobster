@@ -11,38 +11,10 @@ import { encodeToken } from '../token.js';
 import { deleteStateJson, readStateJson, writeStateJson } from '../state/store.js';
 import { readLineFromStream } from '../read_line.js';
 import { resolveInlineShellCommand } from '../shell.js';
+import { validateSupportedWorkflowFile } from './serialize.js';
+import type { WorkflowFile, WorkflowStep } from './types.js';
 
-export type WorkflowFile = {
-  name?: string;
-  description?: string;
-  args?: Record<string, { default?: unknown; description?: string }>;
-  env?: Record<string, string>;
-  cwd?: string;
-  steps: WorkflowStep[];
-};
-
-export type WorkflowStep = {
-  id: string;
-  command?: string;
-  run?: string;
-  pipeline?: string;
-  env?: Record<string, string>;
-  cwd?: string;
-  stdin?: unknown;
-  approval?: WorkflowApproval;
-  condition?: unknown;
-  when?: unknown;
-};
-
-export type WorkflowApproval =
-  | boolean
-  | 'required'
-  | string
-  | {
-    prompt?: string;
-    items?: unknown[];
-    preview?: string;
-  };
+export type { WorkflowApproval, WorkflowFile, WorkflowStep } from './types.js';
 
 export type WorkflowStepResult = {
   id: string;
@@ -103,49 +75,7 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
   const text = await fsp.readFile(filePath, 'utf8');
   const ext = path.extname(filePath).toLowerCase();
   const parsed = ext === '.json' ? JSON.parse(text) : parseYaml(text);
-
-  if (!parsed || typeof parsed !== 'object') {
-    throw new Error('Workflow file must be a JSON/YAML object');
-  }
-
-  const steps = (parsed as WorkflowFile).steps;
-  if (!Array.isArray(steps) || steps.length === 0) {
-    throw new Error('Workflow file requires a non-empty steps array');
-  }
-
-  const seen = new Set<string>();
-  for (const step of steps) {
-    if (!step || typeof step !== 'object') {
-      throw new Error('Workflow step must be an object');
-    }
-    if (!step.id || typeof step.id !== 'string') {
-      throw new Error('Workflow step requires an id');
-    }
-    const shellCommand = typeof step.run === 'string' ? step.run : step.command;
-    const pipeline = typeof step.pipeline === 'string' ? step.pipeline : undefined;
-    const executionCount = Number(Boolean(shellCommand)) + Number(Boolean(pipeline));
-    if (executionCount === 0 && !isApprovalStep(step.approval)) {
-      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, or approval`);
-    }
-    if (executionCount > 1) {
-      throw new Error(`Workflow step ${step.id} can only define one of run, command, or pipeline`);
-    }
-    if (step.run !== undefined && typeof step.run !== 'string') {
-      throw new Error(`Workflow step ${step.id} run must be a string`);
-    }
-    if (step.command !== undefined && typeof step.command !== 'string') {
-      throw new Error(`Workflow step ${step.id} command must be a string`);
-    }
-    if (step.pipeline !== undefined && typeof step.pipeline !== 'string') {
-      throw new Error(`Workflow step ${step.id} pipeline must be a string`);
-    }
-    if (seen.has(step.id)) {
-      throw new Error(`Duplicate workflow step id: ${step.id}`);
-    }
-    seen.add(step.id);
-  }
-
-  return parsed as WorkflowFile;
+  return validateSupportedWorkflowFile(parsed as WorkflowFile);
 }
 
 export function resolveWorkflowArgs(

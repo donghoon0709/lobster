@@ -24,12 +24,21 @@
   "main": "./dist/src/sdk/index.js",
   "scripts": {
     "clean": "rm -rf dist",
-    "build": "pnpm clean && tsc -p tsconfig.json",
+    "build:core": "tsc -p tsconfig.json",
+    "build:studio": "tsc -p apps/lobster-studio/tsconfig.json && node apps/lobster-studio/scripts/copy-static.mjs",
+    "build": "pnpm clean && pnpm build:core && pnpm build:studio",
     "prepack": "pnpm build",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "oxlint --tsconfig tsconfig.json src test",
-    "fmt": "oxlint --tsconfig tsconfig.json --fix src test",
-    "test": "pnpm build && node --test dist/test/*.test.js"
+    "typecheck:core": "tsc -p tsconfig.json --noEmit",
+    "typecheck:studio": "tsc -p apps/lobster-studio/tsconfig.json --noEmit",
+    "typecheck": "pnpm typecheck:core && pnpm typecheck:studio",
+    "lint:core": "oxlint --tsconfig tsconfig.json src test",
+    "lint:studio": "oxlint apps/lobster-studio/src apps/lobster-studio/scripts",
+    "lint": "pnpm lint:core && pnpm lint:studio",
+    "fmt:core": "oxlint --tsconfig tsconfig.json --fix src test",
+    "fmt:studio": "oxlint --fix apps/lobster-studio/src apps/lobster-studio/scripts",
+    "fmt": "pnpm fmt:core && pnpm fmt:studio",
+    "test": "pnpm build && env -u OPENCLAW_URL -u OPENCLAW_TOKEN -u CLAWD_URL -u CLAWD_TOKEN node --test dist/test/*.test.js",
+    "studio:serve": "pnpm build:studio && node apps/lobster-studio/scripts/serve.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
