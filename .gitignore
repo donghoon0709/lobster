@@ -5,6 +5,7 @@ node_modules/
 dist/
 
 # Lobster state
+.omx/
 .lobster/
 .lobster-cache/
 .pnpm-store/
