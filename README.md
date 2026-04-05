@@ -149,10 +149,19 @@ From this folder:
 - `node ./bin/lobster.js doctor`
 - `node ./bin/lobster.js "exec --json --shell 'echo [1,2,3]' | where '0>=0' | json"`
 
+### Documentation
+
+Detailed reference docs live under [`docs/`](./docs/README.md):
+
+- workflow-file authoring: [`docs/lobster-file-syntax.md`](./docs/lobster-file-syntax.md)
+- top-level CLI reference: [`docs/cli-reference.md`](./docs/cli-reference.md)
+- registry command reference: [`docs/command-reference.md`](./docs/command-reference.md)
+
 ### Notes
 
 - `pnpm test` runs `tsc` and then executes tests against `dist/`.
 - `bin/lobster.js` prefers the compiled entrypoint in `dist/` when present.
+
 ## Commands
 
 - `exec`: run OS commands
