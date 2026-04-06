@@ -1,6 +1,7 @@
 import type {
   SupportedConditionalField,
   SupportedExecutionMode,
+  WorkflowApproval,
 } from '../../../src/workflows/types.js';
 
 export type ArgEntry = {
@@ -8,12 +9,22 @@ export type ArgEntry = {
   key: string;
   defaultValue: string;
   description: string;
+  rawDefaultValue?: unknown;
 };
 
 export type EnvEntry = {
   id: string;
   key: string;
   value: string;
+};
+
+export type EditorTaskPassthrough = {
+  cwd?: string;
+  env?: Record<string, string>;
+  approvalScalar?: true | 'required';
+  approvalObject?: Extract<WorkflowApproval, object>;
+  rawStdin?: unknown;
+  rawConditionValue?: unknown;
 };
 
 export type EditorTask = {
@@ -26,6 +37,7 @@ export type EditorTask = {
   stdin: string;
   conditionField: SupportedConditionalField;
   conditionText: string;
+  passthrough: EditorTaskPassthrough;
 };
 
 export type EditorState = {
@@ -35,6 +47,14 @@ export type EditorState = {
   env: EnvEntry[];
   tasks: EditorTask[];
   copyStatus: string;
+  fileStatus: string;
+  currentFileName: string;
+  hasFileBinding: boolean;
+  testStatus: 'idle' | 'running' | 'success' | 'error' | 'unsupported';
+  testMessage: string;
+  passthrough: {
+    cwd?: string;
+  };
 };
 
 function nextIndex(prefix: string, values: Array<{ id: string }>) {
@@ -55,6 +75,7 @@ export function createTask(index = 1): EditorTask {
     stdin: '',
     conditionField: 'when',
     conditionText: '',
+    passthrough: {},
   };
 }
 
@@ -66,10 +87,20 @@ export function createInitialEditorState(): EditorState {
     env: [],
     tasks: [createTask(1)],
     copyStatus: 'Ready to export.',
+    fileStatus: 'Open an existing .lobster file or start a new draft.',
+    currentFileName: '',
+    hasFileBinding: false,
+    testStatus: 'idle',
+    testMessage: 'No test run yet.',
+    passthrough: {},
   };
 }
 
-export function setWorkflowField(state: EditorState, field: 'name' | 'description' | 'copyStatus', value: string): EditorState {
+export function setWorkflowField(
+  state: EditorState,
+  field: keyof Pick<EditorState, 'name' | 'description' | 'copyStatus' | 'fileStatus' | 'currentFileName' | 'hasFileBinding' | 'testStatus' | 'testMessage'>,
+  value: string | boolean,
+): EditorState {
   return { ...state, [field]: value };
 }
 
@@ -84,7 +115,13 @@ export function addArg(state: EditorState): EditorState {
 export function updateArg(state: EditorState, id: string, field: keyof Omit<ArgEntry, 'id'>, value: string): EditorState {
   return {
     ...state,
-    args: state.args.map((entry) => (entry.id === id ? { ...entry, [field]: value } : entry)),
+    args: state.args.map((entry) => {
+      if (entry.id !== id) return entry;
+      if (field === 'defaultValue') {
+        return { ...entry, defaultValue: value, rawDefaultValue: undefined };
+      }
+      return { ...entry, [field]: value };
+    }),
   };
 }
 
@@ -149,7 +186,35 @@ export function updateTaskField(
 ): EditorState {
   return {
     ...state,
-    tasks: state.tasks.map((task, current) => (current === index ? { ...task, [field]: value } : task)),
+    tasks: state.tasks.map((task, current) => {
+      if (current !== index) return task;
+      if (field === 'stdin') {
+        return {
+          ...task,
+          stdin: value,
+          passthrough: { ...task.passthrough, rawStdin: undefined },
+        };
+      }
+      if (field === 'conditionText') {
+        return {
+          ...task,
+          conditionText: value,
+          passthrough: { ...task.passthrough, rawConditionValue: undefined },
+        };
+      }
+      if (field === 'approvalPrompt') {
+        return {
+          ...task,
+          approvalPrompt: value,
+          passthrough: {
+            ...task.passthrough,
+            approvalObject: undefined,
+            approvalScalar: undefined,
+          },
+        };
+      }
+      return { ...task, [field]: value };
+    }),
   };
 }
 
@@ -171,6 +236,10 @@ export function setTaskConditionField(
 ): EditorState {
   return {
     ...state,
-    tasks: state.tasks.map((task, current) => (current === index ? { ...task, conditionField: field } : task)),
+    tasks: state.tasks.map((task, current) => (
+      current === index
+        ? { ...task, conditionField: field, passthrough: { ...task.passthrough, rawConditionValue: undefined } }
+        : task
+    )),
   };
 }

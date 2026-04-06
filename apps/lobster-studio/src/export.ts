@@ -3,16 +3,33 @@ import {
   setConditionalField,
   validateSupportedWorkflowFile,
 } from '../../../src/workflows/serialize.js';
-import type { WorkflowArgDefinition, WorkflowFile, WorkflowStep } from '../../../src/workflows/types.js';
+import type {
+  WorkflowArgDefinition,
+  WorkflowFile,
+  WorkflowStep,
+} from '../../../src/workflows/types.js';
 import type { EditorState, EditorTask } from './editor-state.js';
+
+function stringifyEditorValue(value: unknown) {
+  if (value === undefined) return '';
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
 
 function buildArgs(args: EditorState['args']) {
   const output: Record<string, WorkflowArgDefinition> = {};
   for (const entry of args) {
     const key = entry.key.trim();
     if (!key) continue;
+
+    const rawDefault = entry.rawDefaultValue;
+    const defaultValue = rawDefault !== undefined
+      && entry.defaultValue === stringifyEditorValue(rawDefault)
+      ? rawDefault
+      : entry.defaultValue;
+
     output[key] = {
-      default: entry.defaultValue,
+      default: defaultValue,
       description: entry.description.trim() || undefined,
     };
   }
@@ -47,17 +64,37 @@ function buildStep(task: EditorTask, index: number): WorkflowStep {
     step.pipeline = task.pipeline.trim();
   }
 
-  if (task.executionMode === 'approval-only') {
+  if (task.passthrough.approvalObject
+    && task.approvalPrompt === stringifyEditorValue(task.passthrough.approvalObject.prompt)) {
+    step.approval = task.passthrough.approvalObject;
+  } else if (task.passthrough.approvalScalar && task.approvalPrompt.trim() === '') {
+    step.approval = task.passthrough.approvalScalar;
+  } else if (task.executionMode === 'approval-only') {
     step.approval = task.approvalPrompt.trim() || 'required';
   } else if (task.approvalPrompt.trim()) {
     step.approval = task.approvalPrompt.trim();
   }
 
-  if (task.stdin.trim()) {
+  if (task.passthrough.rawStdin !== undefined && task.stdin === stringifyEditorValue(task.passthrough.rawStdin)) {
+    step.stdin = task.passthrough.rawStdin;
+  } else if (task.stdin.trim()) {
     step.stdin = task.stdin.trim();
   }
 
-  step = setConditionalField(step, task.conditionField, task.conditionText.trim());
+  if (task.passthrough.rawConditionValue !== undefined
+    && task.conditionText === stringifyEditorValue(task.passthrough.rawConditionValue)) {
+    step = setConditionalField(step, task.conditionField, task.passthrough.rawConditionValue);
+  } else {
+    step = setConditionalField(step, task.conditionField, task.conditionText.trim());
+  }
+
+  if (task.passthrough.env && Object.keys(task.passthrough.env).length) {
+    step.env = { ...task.passthrough.env };
+  }
+  if (task.passthrough.cwd) {
+    step.cwd = task.passthrough.cwd;
+  }
+
   return step;
 }
 
@@ -67,6 +104,7 @@ export function editorStateToWorkflowFile(state: EditorState): WorkflowFile {
     description: state.description.trim() || undefined,
     args: buildArgs(state.args),
     env: buildEnv(state.env),
+    cwd: state.passthrough.cwd,
     steps: state.tasks.map((task, index) => buildStep(task, index)),
   };
   return validateSupportedWorkflowFile(workflow);
@@ -81,7 +119,7 @@ export function exportEditorState(state: EditorState) {
   const workflow = editorStateToWorkflowFile(state);
   return {
     workflow,
-    fileName: buildExportFileName(state.name),
+    fileName: state.currentFileName || buildExportFileName(state.name),
     text: serializeWorkflowFile(workflow),
   };
 }
