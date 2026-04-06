@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -16,6 +17,16 @@ function resolveRuntimeModule(relativeCandidates) {
   throw new Error(`Unable to locate Studio runtime module from ${fileURLToPath(import.meta.url)}`);
 }
 
+function resolveRuntimePath(relativeCandidates) {
+  for (const candidate of relativeCandidates) {
+    const candidatePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), candidate);
+    if (existsSync(candidatePath)) {
+      return candidatePath;
+    }
+  }
+  throw new Error(`Unable to locate Studio runtime path from ${fileURLToPath(import.meta.url)}`);
+}
+
 const distToolRuntimeUrl = resolveRuntimeModule([
   '../../../dist/src/core/tool_runtime.js',
   '../../../src/core/tool_runtime.js',
@@ -23,6 +34,10 @@ const distToolRuntimeUrl = resolveRuntimeModule([
 const distWorkflowUrl = resolveRuntimeModule([
   '../../../dist/src/workflows/file.js',
   '../../../src/workflows/file.js',
+]);
+const lobsterCliPath = resolveRuntimePath([
+  '../../../bin/lobster.js',
+  '../../../../bin/lobster.js',
 ]);
 
 async function loadModules() {
@@ -100,6 +115,50 @@ export function normalizeStudioTestEnvelope(envelope) {
   };
 }
 
+async function runStudioHumanCli({
+  filePath,
+  cwd,
+  env,
+}) {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [lobsterCliPath, 'run', '--file', filePath], {
+      cwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      resolve({
+        code,
+        stdout,
+        stderr,
+      });
+    });
+  });
+}
+
+function formatStudioCliOutput(result) {
+  const sections = [];
+  if (result.stderr?.trim()) {
+    sections.push(result.stderr.trim());
+  }
+  if (result.stdout?.trim()) {
+    sections.push(result.stdout.trim());
+  }
+  return sections.join('\n\n');
+}
+
 export async function runStudioWorkflowTest({
   text,
   cwd = repoRoot,
@@ -116,10 +175,20 @@ export async function runStudioWorkflowTest({
         mode: 'tool',
       },
     }));
+    const cliResult = await withTemporaryWorkflow(text, tempRoot, async (filePath) => runStudioHumanCli({
+      filePath,
+      cwd,
+      env,
+    }));
+    const normalized = normalizeStudioTestEnvelope(envelope);
+    const cliOutput = formatStudioCliOutput(cliResult);
 
     return {
       ok: true,
-      result: normalizeStudioTestEnvelope(envelope),
+      result: {
+        ...normalized,
+        ...(cliOutput ? { cliOutput } : null),
+      },
     };
   } catch (error) {
     return {

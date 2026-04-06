@@ -170,6 +170,7 @@ async function runWorkflowTest(text: string) {
     ...state,
     testStatus: 'running',
     testMessage: 'Running Lobster test...',
+    testOutput: '',
   });
 
   try {
@@ -179,6 +180,7 @@ async function runWorkflowTest(text: string) {
         ...state,
         testStatus: 'error',
         testMessage: 'error' in response ? response.error : 'Unknown test failure.',
+        testOutput: '',
       });
       return;
     }
@@ -193,12 +195,14 @@ async function runWorkflowTest(text: string) {
       ...state,
       testStatus: nextStatus,
       testMessage: response.result.message,
+      testOutput: response.result.cliOutput ?? '',
     });
   } catch (error) {
     setState({
       ...state,
       testStatus: 'error',
       testMessage: error instanceof Error ? error.message : String(error),
+      testOutput: '',
     });
   }
 }

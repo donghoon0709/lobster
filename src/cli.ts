@@ -3,7 +3,7 @@ import { createDefaultRegistry } from './commands/registry.js';
 import { runPipeline } from './runtime.js';
 import { encodeToken } from './token.js';
 import { decodeResumeToken, parseResumeArgs } from './resume.js';
-import { runWorkflowFile } from './workflows/file.js';
+import { WorkflowExecutionError, runWorkflowFile, type WorkflowStepTrace } from './workflows/file.js';
 import { randomUUID } from 'node:crypto';
 import { deleteStateJson, readStateJson, writeStateJson } from './state/store.js';
 
@@ -64,7 +64,7 @@ export async function runCli(argv) {
 }
 
 async function handleRun({ argv, registry }) {
-  const { mode, rest, filePath, argsJson } = parseRunArgs(argv);
+  const { mode, rest, filePath, argsJson, verbose } = parseRunArgs(argv);
   const normalizedMode = normalizeMode(mode);
 
   const workflowFile = filePath
@@ -121,6 +121,10 @@ async function handleRun({ argv, registry }) {
         return;
       }
 
+      if (verbose && output.trace?.length) {
+        process.stderr.write(formatWorkflowTrace(output.trace));
+      }
+
       if (output.status === 'ok' && output.output.length) {
         process.stdout.write(JSON.stringify(output.output, null, 2));
         process.stdout.write('\n');
@@ -129,6 +133,14 @@ async function handleRun({ argv, registry }) {
     } catch (err) {
       if (normalizedMode === 'tool') {
         writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
+        process.exitCode = 1;
+        return;
+      }
+      if (err instanceof WorkflowExecutionError) {
+        if (verbose && err.trace.length) {
+          process.stderr.write(formatWorkflowTrace(err.trace));
+        }
+        process.stderr.write(formatWorkflowFailure(err));
         process.exitCode = 1;
         return;
       }
@@ -229,6 +241,7 @@ function parseRunArgs(argv) {
   let mode = 'human';
   let filePath = null;
   let argsJson = null;
+  let verbose = false;
 
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -275,10 +288,15 @@ function parseRunArgs(argv) {
       continue;
     }
 
+    if (tok === '--verbose') {
+      verbose = true;
+      continue;
+    }
+
     rest.push(tok);
   }
 
-  return { mode, rest, filePath, argsJson };
+  return { mode, rest, filePath, argsJson, verbose };
 }
 
 function normalizeMode(mode) {
@@ -519,13 +537,69 @@ function writeToolEnvelope(payload) {
   process.stdout.write('\n');
 }
 
+function formatWorkflowTrace(trace: WorkflowStepTrace[]) {
+  const lines = ['Workflow step summary:', ''];
+  for (const entry of trace) {
+    lines.push(`- ${entry.stepId} [${entry.stepType}] ${entry.status}`);
+    if (entry.originalText) {
+      lines.push(`  original: ${entry.originalText}`);
+    }
+    if (entry.resolvedText) {
+      lines.push(`  resolved: ${entry.resolvedText}`);
+    }
+    if (entry.stdinPreview) {
+      lines.push('  stdin:');
+      lines.push(indentBlock(entry.stdinPreview, '    '));
+    }
+    if (entry.stdout) {
+      lines.push('  stdout:');
+      lines.push(indentBlock(entry.stdout, '    '));
+    }
+    if (entry.stderr) {
+      lines.push('  stderr:');
+      lines.push(indentBlock(entry.stderr, '    '));
+    }
+    lines.push('');
+  }
+  return `${lines.join('\n')}`.replace(/\n{3,}$/u, '\n\n');
+}
+
+function formatWorkflowFailure(error: WorkflowExecutionError) {
+  const lines = [
+    `Workflow failed at step ${error.stepId} [${error.stepType}]`,
+  ];
+  if (error.originalText) {
+    lines.push(`Original: ${error.originalText}`);
+  }
+  if (error.resolvedText) {
+    lines.push(`Resolved: ${error.resolvedText}`);
+  }
+  if (error.stdinPreview) {
+    lines.push('stdin preview:');
+    lines.push(indentBlock(error.stdinPreview, '  '));
+  }
+  lines.push('stdout:');
+  lines.push(indentBlock(error.stdout?.trim() ? error.stdout : '(empty)', '  '));
+  lines.push('stderr:');
+  lines.push(indentBlock(error.stderr?.trim() ? error.stderr : '(empty)', '  '));
+  return `${lines.join('\n')}\n`;
+}
+
+function indentBlock(text: string, indent: string) {
+  return text
+    .replace(/\s+$/u, '')
+    .split('\n')
+    .map((line) => `${indent}${line}`)
+    .join('\n');
+}
+
 function helpText() {
   return `lobster — OpenClaw-native typed shell\n\n` +
     `Usage:\n` +
     `  lobster '<pipeline>'\n` +
     `  lobster run --mode tool '<pipeline>'\n` +
     `  lobster run path/to/workflow.lobster\n` +
-    `  lobster run --file path/to/workflow.lobster --args-json '{...}'\n` +
+    `  lobster run --file path/to/workflow.lobster --args-json '{...}' --verbose\n` +
     `  lobster resume --token <token> --approve yes|no\n` +
     `  lobster doctor\n` +
     `  lobster version\n` +

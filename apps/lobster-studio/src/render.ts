@@ -38,15 +38,16 @@ function selected(mode: SupportedExecutionMode, current: SupportedExecutionMode)
 function renderExecutionField(
   mode: SupportedExecutionMode,
   current: SupportedExecutionMode,
+  field: 'command' | 'run' | 'pipeline',
   label: string,
   value: string,
-  key: string,
+  elementId: string,
 ) {
   const active = current === mode ? 'active' : '';
   return `
     <div class="field-group field-group--full execution-field ${active}">
-      <label for="${key}">${label}</label>
-      <textarea id="${key}" data-task-field="${key}" ${current === 'approval-only' ? 'disabled' : ''}>${escapeHtml(value)}</textarea>
+      <label for="${elementId}">${label}</label>
+      <textarea id="${elementId}" data-task-field="${field}" ${current === 'approval-only' ? 'disabled' : ''}>${escapeHtml(value)}</textarea>
     </div>
   `;
 }
@@ -81,9 +82,9 @@ function renderTask(task: EditorTask, index: number, total: number) {
           </select>
         </div>
 
-        ${renderExecutionField('command', task.executionMode, 'command', task.command, `command-${index}`)}
-        ${renderExecutionField('run', task.executionMode, 'run', task.run, `run-${index}`)}
-        ${renderExecutionField('pipeline', task.executionMode, 'pipeline', task.pipeline, `pipeline-${index}`)}
+        ${renderExecutionField('command', task.executionMode, 'command', 'command', task.command, `command-${index}`)}
+        ${renderExecutionField('run', task.executionMode, 'run', 'run', task.run, `run-${index}`)}
+        ${renderExecutionField('pipeline', task.executionMode, 'pipeline', 'pipeline', task.pipeline, `pipeline-${index}`)}
 
         <div class="field-group">
           <label for="approval-${index}">Approval prompt</label>
@@ -259,6 +260,9 @@ export function renderEditor(root: HTMLElement, state: EditorState, actions: Act
               <button type="button" id="run-test" ${testDisabled ? 'disabled' : ''}>Test</button>
             </div>
             <div class="${testClass}">${escapeHtml(state.testMessage)}</div>
+            ${state.testOutput
+              ? `<textarea class="test-output" readonly>${escapeHtml(state.testOutput)}</textarea>`
+              : ''}
           </div>
           <div class="panel__section">
             <div class="hint-card">

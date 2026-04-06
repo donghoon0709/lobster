@@ -52,6 +52,7 @@ export type EditorState = {
   hasFileBinding: boolean;
   testStatus: 'idle' | 'running' | 'success' | 'error' | 'unsupported';
   testMessage: string;
+  testOutput: string;
   passthrough: {
     cwd?: string;
   };
@@ -92,13 +93,14 @@ export function createInitialEditorState(): EditorState {
     hasFileBinding: false,
     testStatus: 'idle',
     testMessage: 'No test run yet.',
+    testOutput: '',
     passthrough: {},
   };
 }
 
 export function setWorkflowField(
   state: EditorState,
-  field: keyof Pick<EditorState, 'name' | 'description' | 'copyStatus' | 'fileStatus' | 'currentFileName' | 'hasFileBinding' | 'testStatus' | 'testMessage'>,
+  field: keyof Pick<EditorState, 'name' | 'description' | 'copyStatus' | 'fileStatus' | 'currentFileName' | 'hasFileBinding' | 'testStatus' | 'testMessage' | 'testOutput'>,
   value: string | boolean,
 ): EditorState {
   return { ...state, [field]: value };

@@ -8,12 +8,8 @@ import {
   validateGeneratedDraftDescriptor,
   type GeneratedDraftDescriptor,
 } from '../../../src/workflows/generated_draft.js';
-import type {
-  WorkflowApproval,
-  WorkflowArgDefinition,
-  WorkflowStep,
-} from '../../../src/workflows/types.js';
-import type { EditorState, EditorTask } from './editor-state.js';
+import type { EditorState } from './editor-state.js';
+import { importWorkflowToEditorState } from './import.js';
 
 const GENERATED_DRAFT_PARAM = 'generatedDraft';
 const GENERATED_DRAFT_LOADED_STATUS = 'Loaded generated draft.';
@@ -59,65 +55,6 @@ function isUnsupportedPathValue(value: string) {
     || /^[A-Za-z]:[\\/]/u.test(trimmed);
 }
 
-function stringifyDraftValue(value: unknown) {
-  if (typeof value === 'string') return value;
-  if (value === undefined || value === null) return '';
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
-  return JSON.stringify(value);
-}
-
-function normalizeApprovalPrompt(approval: WorkflowApproval) {
-  if (approval === undefined || approval === false || approval === null) return '';
-  if (approval === true || approval === 'required') return 'required';
-  if (typeof approval === 'string') return approval;
-  if (typeof approval === 'object' && typeof approval.prompt === 'string') {
-    return approval.prompt;
-  }
-  return 'required';
-}
-
-function determineExecutionMode(step: WorkflowStep): EditorTask['executionMode'] {
-  if (typeof step.run === 'string') return 'run';
-  if (typeof step.pipeline === 'string') return 'pipeline';
-  if (typeof step.command === 'string') return 'command';
-  return 'approval-only';
-}
-
-function draftArgsToEditorArgs(args: Record<string, WorkflowArgDefinition> | undefined): EditorState['args'] {
-  if (!args) return [];
-  return Object.entries(args).map(([key, definition], index) => ({
-    id: `arg_${index + 1}`,
-    key,
-    defaultValue: stringifyDraftValue(definition?.default),
-    description: definition?.description ?? '',
-  }));
-}
-
-function draftEnvToEditorEnv(env: Record<string, string> | undefined): EditorState['env'] {
-  if (!env) return [];
-  return Object.entries(env).map(([key, value], index) => ({
-    id: `env_${index + 1}`,
-    key,
-    value,
-  }));
-}
-
-function draftStepsToEditorTasks(steps: WorkflowStep[]): EditorState['tasks'] {
-  return steps.map((step) => ({
-    id: step.id,
-    executionMode: determineExecutionMode(step),
-    run: typeof step.run === 'string' ? step.run : '',
-    command: typeof step.command === 'string' ? step.command : '',
-    pipeline: typeof step.pipeline === 'string' ? step.pipeline : '',
-    approvalPrompt: normalizeApprovalPrompt(step.approval),
-    stdin: stringifyDraftValue(step.stdin),
-    conditionField: step.condition !== undefined ? 'condition' : 'when',
-    conditionText: stringifyDraftValue(step.condition ?? step.when),
-  }));
-}
-
 export {
   GENERATED_DRAFT_DESCRIPTOR_KIND,
   GENERATED_DRAFT_DESCRIPTOR_VERSION,
@@ -134,12 +71,17 @@ export function buildGeneratedDraftHandoffUrl(baseUrl: string | URL, descriptor:
 
 export function hydrateEditorStateFromGeneratedDraftDescriptor(descriptor: GeneratedDraftDescriptor): EditorState {
   const validated = validateGeneratedDraftDescriptor(descriptor);
+  const imported = importWorkflowToEditorState(validated.workflow, {
+    fileName: `${validated.workflow.name ?? 'generated-draft'}.lobster`,
+    hasFileBinding: false,
+  });
   return {
-    name: validated.workflow.name ?? 'generated-draft',
-    description: validated.workflow.description ?? '',
-    args: draftArgsToEditorArgs(validated.workflow.args),
-    env: draftEnvToEditorEnv(validated.workflow.env),
-    tasks: draftStepsToEditorTasks(validated.workflow.steps),
+    ...imported,
+    tasks: imported.tasks.map((task) => (
+      task.passthrough.rawConditionValue === undefined
+        ? { ...task, conditionField: 'when' }
+        : task
+    )),
     copyStatus: GENERATED_DRAFT_LOADED_STATUS,
   };
 }
