@@ -14,9 +14,16 @@ import {
   updateEnv,
   updateTaskField,
 } from './editor-state.js';
+import { resolveGeneratedDraftHydration } from './generated-draft.js';
 import { renderEditor } from './render.js';
 
 let state = createInitialEditorState();
+const generatedDraftHydration = resolveGeneratedDraftHydration(globalThis.location.href);
+if (generatedDraftHydration.kind === 'loaded') {
+  state = generatedDraftHydration.state;
+} else if (generatedDraftHydration.kind === 'error') {
+  state = setWorkflowField(state, 'copyStatus', generatedDraftHydration.message);
+}
 
 const mount = document.querySelector<HTMLElement>('#app');
 if (!mount) {

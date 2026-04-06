@@ -5,6 +5,7 @@
   "type": "module",
   "bin": {
     "lobster": "bin/lobster.js",
+    "lobster-mcp": "bin/lobster-mcp.js",
     "openclaw.invoke": "bin/openclaw.invoke.js",
     "clawd.invoke": "bin/clawd.invoke.js"
   },
@@ -38,6 +39,7 @@
     "fmt:studio": "oxlint --fix apps/lobster-studio/src apps/lobster-studio/scripts",
     "fmt": "pnpm fmt:core && pnpm fmt:studio",
     "test": "pnpm build && env -u OPENCLAW_URL -u OPENCLAW_TOKEN -u CLAWD_URL -u CLAWD_TOKEN node --test dist/test/*.test.js",
+    "mcp:serve": "node bin/lobster-mcp.js",
     "studio:serve": "pnpm build:studio && node apps/lobster-studio/scripts/serve.mjs"
   },
   "devDependencies": {

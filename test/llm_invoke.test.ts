@@ -86,6 +86,75 @@ test('llm.invoke auto-detects OpenClaw provider and normalizes output', async ()
   }
 });
 
+test('llm.invoke accepts OpenClaw content/details response envelopes', async () => {
+  const registry = createDefaultRegistry();
+  const cmd = registry.get('llm.invoke');
+  assert.ok(cmd, 'llm.invoke should be registered');
+  const cacheDir = await mkdtemp(path.join(tmpdir(), 'lobster-cache-'));
+
+  const server = http.createServer((req, res) => {
+    if (req.method !== 'POST' || req.url !== '/tools/invoke') {
+      res.writeHead(404);
+      res.end('nope');
+      return;
+    }
+    let buf = '';
+    req.setEncoding('utf8');
+    req.on('data', (d) => (buf += d));
+    req.on('end', () => {
+      const parsed = JSON.parse(buf || '{}');
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          result: {
+            content: [
+              {
+                type: 'text',
+                text: '{"summary":"hello from content"}',
+              },
+            ],
+            details: {
+              json: { summary: 'hello from content' },
+              provider: 'openai-codex',
+              model: parsed.args?.model ?? 'gpt-5.4',
+            },
+          },
+        }),
+      );
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const addr = server.address();
+  const port = typeof addr === 'object' && addr ? addr.port : 0;
+
+  try {
+    const result = await cmd.run({
+      input: streamOf([{ kind: 'text', text: 'doc' }]),
+      args: {
+        _: [],
+        model: 'gpt-5.4',
+        prompt: 'Summarize',
+        'output-schema': '{"type":"object","required":["summary"]}',
+      },
+      ctx: baseCtx({ OPENCLAW_URL: `http://localhost:${port}`, LOBSTER_CACHE_DIR: cacheDir }, registry),
+    } as any);
+
+    const items = await collect(result.output!);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].kind, 'llm.invoke');
+    assert.equal(items[0].source, 'openclaw');
+    assert.equal(items[0].model, 'gpt-5.4');
+    assert.equal(items[0].output.text, '{"summary":"hello from content"}');
+    assert.deepEqual(items[0].output.data, { summary: 'hello from content' });
+    assert.equal(items[0].diagnostics.provider, 'openai-codex');
+  } finally {
+    await rm(cacheDir, { recursive: true, force: true });
+    await closeServer(server);
+  }
+});
+
 test('llm.invoke uses Pi adapter over local HTTP bridge', async () => {
   const registry = createDefaultRegistry();
   const cmd = registry.get('llm.invoke');

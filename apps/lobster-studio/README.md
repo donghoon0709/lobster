@@ -14,6 +14,7 @@ Lobster Studio is the v0.2.0 in-repo web editor for authoring `.lobster` workflo
 - Task `run` / `command` / `pipeline`
 - Task `approval`, `stdin`, `when` / `condition`
 - Copy / download `.lobster` export
+- Generated-draft handoff URLs from the MCP server
 
 ## Non-goals
 
