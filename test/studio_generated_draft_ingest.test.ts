@@ -47,12 +47,18 @@ test('generated draft handoff hydrates Studio editor state from a bounded descri
   assert.equal(hydration.state.name, 'handoff-workflow');
   assert.equal(hydration.state.description, 'Prepared by MCP');
   assert.equal(hydration.state.copyStatus, 'Loaded generated draft.');
+  assert.equal(hydration.state.fileStatus, 'Loaded handoff-workflow.lobster without overwrite-save binding.');
+  assert.equal(hydration.state.currentFileName, 'handoff-workflow.lobster');
+  assert.equal(hydration.state.hasFileBinding, false);
+  assert.equal(hydration.state.testStatus, 'idle');
+  assert.equal(hydration.state.testMessage, 'Ready to test the current working copy.');
   assert.deepEqual(hydration.state.args, [
     {
       id: 'arg_1',
       key: 'city',
       defaultValue: 'Seoul',
       description: 'default city',
+      rawDefaultValue: 'Seoul',
     },
   ]);
   assert.deepEqual(hydration.state.env, [
@@ -98,6 +104,8 @@ test('generated draft handoff hydrates Studio editor state from a bounded descri
       },
     ],
   );
+  assert.equal(hydration.state.tasks[1]?.passthrough.rawStdin, '$fetch.json');
+  assert.equal(hydration.state.tasks[2]?.passthrough.rawConditionValue, '$approve.approved');
 });
 
 test('generated draft handoff also supports hash-based descriptor URLs', () => {

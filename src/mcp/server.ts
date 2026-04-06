@@ -2,7 +2,8 @@ import { Writable } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 
 import { createDefaultRegistry } from '../commands/registry.js';
-import { runToolRequest } from '../core/tool_runtime.js';
+import { applyExistingWorkflowEdit, editExistingWorkflow } from '../workflows/edit_existing.js';
+import { generateWorkflowDraft } from '../workflows/generate_draft.js';
 
 type JsonRpcRequest = {
   jsonrpc?: string;
@@ -41,52 +42,69 @@ const GENERATE_TOOL: ToolDefinition = {
       provider: { type: 'string', description: 'Optional llm.invoke provider override' },
       model: { type: 'string', description: 'Optional llm.invoke model override' },
       studioUrl: { type: 'string', description: 'Optional Lobster Studio base URL override' },
+      validate: { type: 'boolean', description: 'Enable conditional auto-validation and bounded self-repair (default: true for MCP).' },
+      workflowArgs: { type: 'object', description: 'Optional workflow args used for validation execution when needed.' },
+      maxRepairAttempts: { type: 'number', description: 'Optional retry cap for repair attempts (max 3).' },
     },
     required: ['request'],
     additionalProperties: false,
   },
 };
 
-function shellQuote(arg: string) {
-  if (/^[A-Za-z0-9_\-./:=@]+$/.test(arg)) return arg;
-  return `'${String(arg).replace(/'/g, `'\\''`)}'`;
-}
+const EDIT_TOOL: ToolDefinition = {
+  name: 'edit_existing_workflow',
+  description: 'Edit an existing .lobster workflow by explicit path, self-test it on a temporary working copy, and return review artifacts without mutating the real file.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      filePath: { type: 'string', description: 'Explicit path to the existing .lobster file.' },
+      request: { type: 'string', description: 'Natural-language edit request.' },
+      provider: { type: 'string', description: 'Optional llm.invoke provider override' },
+      model: { type: 'string', description: 'Optional llm.invoke model override' },
+      studioUrl: { type: 'string', description: 'Optional Lobster Studio base URL override' },
+      validate: { type: 'boolean', description: 'Enable conditional self-test/self-fix on a temporary working copy (default: true).' },
+      workflowArgs: { type: 'object', description: 'Optional workflow args used for validation execution when needed.' },
+      maxRepairAttempts: { type: 'number', description: 'Optional retry cap for self-fix attempts (max 3).' },
+    },
+    required: ['filePath', 'request'],
+    additionalProperties: false,
+  },
+};
 
-function createPipelineForDraft(args: Record<string, unknown>) {
-  const parts = ['workflows.generate_draft'];
-  const request = String(args.request ?? '').trim();
-  if (!request) {
-    throw new Error('generate_workflow_draft requires request');
-  }
-  parts.push('--request', shellQuote(request));
-
-  const mappings: Array<[string, string]> = [
-    ['destination', '--destination'],
-    ['provider', '--provider'],
-    ['model', '--model'],
-    ['studioUrl', '--studio-url'],
-  ];
-  for (const [key, flag] of mappings) {
-    const value = args[key];
-    if (typeof value === 'string' && value.trim()) {
-      parts.push(flag, shellQuote(value.trim()));
-    }
-  }
-  return parts.join(' ');
-}
+const APPLY_EDIT_TOOL: ToolDefinition = {
+  name: 'apply_existing_workflow_edit',
+  description: 'Apply a previously proposed existing-workflow edit to the real .lobster file after explicit approval.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      sessionId: { type: 'string', description: 'Internal apply/edit session identifier returned by edit_existing_workflow.' },
+    },
+    required: ['sessionId'],
+    additionalProperties: false,
+  },
+};
 
 function envelopeToToolResult(envelope: any) {
-  if (!envelope?.ok) {
+  if (!envelope) {
     return {
       isError: true,
-      content: [{ type: 'text', text: envelope?.error?.message ?? 'Unknown Lobster MCP error' }],
+      content: [{ type: 'text', text: 'Unknown Lobster MCP error' }],
     };
   }
 
-  const first = Array.isArray(envelope.output) ? envelope.output[0] : null;
   return {
-    content: [{ type: 'text', text: JSON.stringify(first, null, 2) }],
-    structuredContent: first,
+    content: [{ type: 'text', text: JSON.stringify(envelope, null, 2) }],
+    structuredContent: envelope,
+    isError: false,
+  };
+}
+
+function editResultToToolResult(result: any) {
+  const userFacing = { ...result };
+  delete userFacing.applySessionId;
+  return {
+    content: [{ type: 'text', text: JSON.stringify(userFacing, null, 2) }],
+    structuredContent: result,
     isError: false,
   };
 }
@@ -118,14 +136,14 @@ async function handleRequest(request: JsonRpcRequest) {
     return {
       jsonrpc: '2.0',
       id: request.id ?? null,
-      result: { tools: [GENERATE_TOOL] },
+      result: { tools: [GENERATE_TOOL, EDIT_TOOL, APPLY_EDIT_TOOL] },
     };
   }
 
   if (request.method === 'tools/call') {
     const params = request.params ?? {};
     const name = params.name;
-    if (name !== GENERATE_TOOL.name) {
+    if (![GENERATE_TOOL.name, EDIT_TOOL.name, APPLY_EDIT_TOOL.name].includes(String(name))) {
       return {
         jsonrpc: '2.0',
         id: request.id ?? null,
@@ -134,22 +152,51 @@ async function handleRequest(request: JsonRpcRequest) {
     }
 
     try {
-      const pipeline = createPipelineForDraft(params.arguments ?? {});
-      const envelope = await runToolRequest({
-        pipeline,
-        ctx: {
-          env: process.env,
-          cwd: process.cwd(),
-          registry: createDefaultRegistry(),
-          stdin: process.stdin,
-          stdout: silentWritable,
-          stderr: silentWritable,
-        },
-      });
+      const args = params.arguments ?? {};
+      const runtimeCtx = {
+        env: process.env,
+        cwd: process.cwd(),
+        registry: createDefaultRegistry(),
+        stdin: process.stdin,
+        stdout: silentWritable,
+        stderr: silentWritable,
+      };
+      const result = name === GENERATE_TOOL.name
+        ? await generateWorkflowDraft({
+          request: String(args.request ?? '').trim(),
+          destination: typeof args.destination === 'string' ? args.destination : undefined,
+          studioBaseUrl: typeof args.studioUrl === 'string' ? args.studioUrl : undefined,
+          provider: typeof args.provider === 'string' ? args.provider : undefined,
+          model: typeof args.model === 'string' ? args.model : undefined,
+          validation: {
+            enabled: typeof args.validate === 'boolean' ? args.validate : true,
+            workflowArgs: args.workflowArgs && typeof args.workflowArgs === 'object' ? args.workflowArgs : undefined,
+            maxRepairAttempts: typeof args.maxRepairAttempts === 'number' ? args.maxRepairAttempts : undefined,
+          },
+          ctx: runtimeCtx,
+        })
+        : name === EDIT_TOOL.name
+          ? await editExistingWorkflow({
+            filePath: String(args.filePath ?? '').trim(),
+            request: String(args.request ?? '').trim(),
+            studioBaseUrl: typeof args.studioUrl === 'string' ? args.studioUrl : undefined,
+            provider: typeof args.provider === 'string' ? args.provider : undefined,
+            model: typeof args.model === 'string' ? args.model : undefined,
+            validation: {
+              enabled: typeof args.validate === 'boolean' ? args.validate : true,
+              workflowArgs: args.workflowArgs && typeof args.workflowArgs === 'object' ? args.workflowArgs : undefined,
+              maxRepairAttempts: typeof args.maxRepairAttempts === 'number' ? args.maxRepairAttempts : undefined,
+            },
+            ctx: runtimeCtx,
+          })
+          : await applyExistingWorkflowEdit({
+            sessionId: String(args.sessionId ?? '').trim(),
+            ctx: runtimeCtx,
+          });
       return {
         jsonrpc: '2.0',
         id: request.id ?? null,
-        result: envelopeToToolResult(envelope),
+        result: name === EDIT_TOOL.name ? editResultToToolResult(result) : envelopeToToolResult(result),
       };
     } catch (error) {
       return {

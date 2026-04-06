@@ -111,6 +111,7 @@ export function importWorkflowFile(workflow: WorkflowFile, fileName = 'workflow.
     hasFileBinding: true,
     testStatus: 'idle',
     testMessage: 'Ready to test the current working copy.',
+    testOutput: '',
     passthrough: {
       cwd: workflow.cwd,
     },

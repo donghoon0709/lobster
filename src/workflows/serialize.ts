@@ -34,6 +34,59 @@ function executionCount(step: WorkflowStep) {
     + Number(typeof step.pipeline === 'string');
 }
 
+function renderIndent(depth: number) {
+  return '  '.repeat(depth);
+}
+
+function renderKey(key: string) {
+  return /^[A-Za-z_][A-Za-z0-9_-]*$/u.test(key) ? key : JSON.stringify(key);
+}
+
+function isPlainScalarString(value: string) {
+  return /^[A-Za-z0-9_./${}-]+$/u.test(value)
+    && !/^(true|false|null|~|-?\d+(\.\d+)?)$/u.test(value);
+}
+
+function renderInlineValue(value: unknown) {
+  if (typeof value === 'string') {
+    return isPlainScalarString(value) ? value : JSON.stringify(value);
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (value === null) {
+    return 'null';
+  }
+  return JSON.stringify(stripUndefined(value));
+}
+
+function pushNestedRecord(
+  lines: string[],
+  depth: number,
+  key: string,
+  record: Record<string, unknown> | undefined,
+) {
+  if (!record || Object.keys(record).length === 0) return;
+  lines.push(`${renderIndent(depth)}${renderKey(key)}:`);
+  for (const [entryKey, entryValue] of Object.entries(record)) {
+    if (entryValue === undefined) continue;
+    lines.push(`${renderIndent(depth + 1)}${renderKey(entryKey)}: ${renderInlineValue(entryValue)}`);
+  }
+}
+
+function pushStepLines(lines: string[], step: WorkflowStep) {
+  lines.push(`  - id: ${renderInlineValue(step.id)}`);
+  if (step.run !== undefined) lines.push(`    run: ${renderInlineValue(step.run)}`);
+  if (step.command !== undefined) lines.push(`    command: ${renderInlineValue(step.command)}`);
+  if (step.pipeline !== undefined) lines.push(`    pipeline: ${renderInlineValue(step.pipeline)}`);
+  pushNestedRecord(lines, 2, 'env', step.env);
+  if (step.cwd !== undefined) lines.push(`    cwd: ${renderInlineValue(step.cwd)}`);
+  if (step.stdin !== undefined) lines.push(`    stdin: ${renderInlineValue(step.stdin)}`);
+  if (step.approval !== undefined) lines.push(`    approval: ${renderInlineValue(step.approval)}`);
+  if (step.when !== undefined) lines.push(`    when: ${renderInlineValue(step.when)}`);
+  if (step.condition !== undefined) lines.push(`    condition: ${renderInlineValue(step.condition)}`);
+}
+
 export function validateSupportedWorkflowFile(workflow: WorkflowFile) {
   if (!workflow || typeof workflow !== 'object' || Array.isArray(workflow)) {
     throw new Error('Workflow file must be a JSON/YAML object');
@@ -95,6 +148,29 @@ export function setConditionalField(
 }
 
 export function serializeWorkflowFile(workflow: WorkflowFile) {
-  validateSupportedWorkflowFile(workflow);
-  return `${JSON.stringify(stripUndefined(workflow), null, 2)}\n`;
+  const validated = validateSupportedWorkflowFile(workflow);
+  const lines: string[] = [];
+
+  if (validated.name !== undefined) lines.push(`name: ${renderInlineValue(validated.name)}`);
+  if (validated.description !== undefined) lines.push(`description: ${renderInlineValue(validated.description)}`);
+  if (validated.args && Object.keys(validated.args).length) {
+    lines.push('args:');
+    for (const [argName, definition] of Object.entries(validated.args)) {
+      if (definition.default === undefined && definition.description === undefined) {
+        lines.push(`  ${renderKey(argName)}: {}`);
+        continue;
+      }
+      lines.push(`  ${renderKey(argName)}:`);
+      if (definition.default !== undefined) lines.push(`    default: ${renderInlineValue(definition.default)}`);
+      if (definition.description !== undefined) lines.push(`    description: ${renderInlineValue(definition.description)}`);
+    }
+  }
+  pushNestedRecord(lines, 0, 'env', validated.env);
+  if (validated.cwd !== undefined) lines.push(`cwd: ${renderInlineValue(validated.cwd)}`);
+  lines.push('steps:');
+  for (const step of validated.steps) {
+    pushStepLines(lines, step);
+  }
+
+  return `${lines.join('\n')}\n`;
 }

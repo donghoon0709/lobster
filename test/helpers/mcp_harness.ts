@@ -9,6 +9,7 @@ import type { TestContext } from 'node:test';
 
 import { serializeWorkflowFile } from '../../src/workflows/serialize.js';
 import { loadWorkflowFile } from '../../src/workflows/file.js';
+import { parseWorkflowFileText } from '../../src/workflows/parse.js';
 
 type JsonRpcId = string | number;
 
@@ -363,7 +364,7 @@ async function startFakeLlmAdapter(t: TestContext) {
             output: {
               format: 'text',
               text: process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT ?? DETERMINISTIC_WORKFLOW_TEXT,
-              data: JSON.parse(process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT ?? DETERMINISTIC_WORKFLOW_TEXT),
+              data: parseWorkflowFileText(process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT ?? DETERMINISTIC_WORKFLOW_TEXT),
             },
             diagnostics: { adapter: 'mcp-test' },
           },
@@ -396,9 +397,8 @@ function collectStringCandidates(value: unknown, seen = new Set<unknown>()): str
 
 function looksLikeWorkflowText(value: string) {
   const trimmed = value.trim();
-  if (!trimmed.startsWith('{')) return false;
   try {
-    const parsed = JSON.parse(trimmed);
+    const parsed = parseWorkflowFileText(trimmed);
     return Boolean(parsed && typeof parsed === 'object' && Array.isArray(parsed.steps));
   } catch {
     return false;

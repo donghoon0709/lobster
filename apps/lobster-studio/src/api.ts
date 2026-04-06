@@ -5,7 +5,7 @@ export type ParseWorkflowResponse =
   | { ok: false; error: string };
 
 export type StudioTestResponse =
-  | { ok: true; result: { status: 'success' | 'error' | 'unsupported-approval'; message: string; output?: unknown[] } }
+  | { ok: true; result: { status: 'success' | 'error' | 'unsupported-approval'; message: string; output?: unknown[]; cliOutput?: string } }
   | { ok: false; error: string };
 
 async function postJson<T>(url: string, body: Record<string, unknown>): Promise<T> {

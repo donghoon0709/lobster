@@ -59,6 +59,7 @@ steps:
   assert.equal(result.ok, true);
   if (result.ok) {
     assert.equal(result.result.status, 'success');
+    assert.match(result.result.cliOutput ?? '', /\[\s*"ok"\s*\]/);
   }
 
   assert.deepEqual(await readdir(tempRoot), []);
@@ -78,6 +79,8 @@ steps:
   if (result.ok) {
     assert.equal(result.result.status, 'error');
     assert.match(result.result.message, /boom|exit/i);
+    assert.match(result.result.cliOutput ?? '', /Workflow failed at step fail \[shell\]/);
+    assert.match(result.result.cliOutput ?? '', /stderr:/);
   }
 });
 

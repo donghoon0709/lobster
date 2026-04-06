@@ -47,6 +47,9 @@ test('visual editor export produces a .lobster file accepted by the runtime load
 
   const { fileName, text } = exportEditorState(state);
   assert.equal(fileName, 'sample-workflow.lobster');
+  assert.match(text, /^name: sample-workflow/m);
+  assert.match(text, /^steps:/m);
+  assert.doesNotMatch(text, /^\s*\{/);
 
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-visual-export-'));
   const filePath = path.join(tmpDir, fileName);

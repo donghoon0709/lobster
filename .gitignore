@@ -22,3 +22,4 @@ clawdbot_enhancement.md
 # Environment
 .env
 .env.local
+.gstack/
