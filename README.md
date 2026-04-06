@@ -169,6 +169,23 @@ Detailed reference docs live under [`docs/`](./docs/README.md):
 - `where`, `pick`, `head`: data shaping
 - `json`, `table`: renderers
 - `approve`: approval gate (TTY prompt or `--emit` for OpenClaw integration)
+- `workflows.generate_draft`: generate a canonical `.lobster` draft plus a Lobster Studio handoff
+
+## MCP server
+
+Lobster now ships a local MCP server entrypoint for external AI agents:
+
+```bash
+lobster-mcp
+# or
+pnpm mcp:serve
+```
+
+The primary MCP tool is `generate_workflow_draft`. It:
+- accepts a natural-language workflow request
+- produces canonical `.lobster` text
+- optionally writes the generated file when a destination is provided
+- returns a Lobster Studio generated-draft handoff URL so the result can be opened in Studio immediately
 
 ## Next steps
 

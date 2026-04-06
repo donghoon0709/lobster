@@ -123,11 +123,11 @@ export function renderEditor(root: HTMLElement, state: EditorState, actions: Act
     <div class="page">
       <main class="panel">
         <section class="hero">
-          <div class="eyebrow">v0.2.0 authoring-only editor</div>
+          <div class="eyebrow">v0.2.0 authoring editor</div>
           <h1>Lobster Studio</h1>
           <p>
-            Build ordered Lobster workflows as task cards, then copy or download a generated
-            <code>.lobster</code> file.
+            Build ordered Lobster workflows as task cards, or start from a generated draft
+            handoff, then copy or download a <code>.lobster</code> file.
           </p>
         </section>
 
