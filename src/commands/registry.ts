@@ -17,6 +17,7 @@ import { stateGetCommand, stateSetCommand } from "./stdlib/state.js";
 import { diffLastCommand } from "./stdlib/diff_last.js";
 import { workflowsListCommand } from "./workflows/workflows_list.js";
 import { workflowsRunCommand } from "./workflows/workflows_run.js";
+import { workflowsGenerateDraftCommand } from "./workflows/workflows_generate_draft.js";
 import { commandsListCommand } from "./commands_list.js";
 import { gogGmailSearchCommand } from "./stdlib/gog_gmail_search.js";
 import { gogGmailSendCommand } from "./stdlib/gog_gmail_send.js";
@@ -47,6 +48,7 @@ export function createDefaultRegistry() {
     diffLastCommand,
     workflowsListCommand,
     workflowsRunCommand,
+    workflowsGenerateDraftCommand,
     commandsListCommand,
     gogGmailSearchCommand,
     gogGmailSendCommand,

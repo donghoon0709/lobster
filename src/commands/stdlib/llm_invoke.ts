@@ -574,12 +574,66 @@ async function invokeOpenClawAdapter({ endpoint, token, payload }: { endpoint: U
     }
     const inner = parsed.result;
     if (inner && typeof inner === 'object' && !Array.isArray(inner) && 'ok' in inner) {
-      return inner as LlmResponseEnvelope;
+      return normalizeOpenClawEnvelope(inner as LlmResponseEnvelope);
     }
-    return { ok: true, result: inner } as LlmResponseEnvelope;
+    return normalizeOpenClawEnvelope({ ok: true, result: inner } as LlmResponseEnvelope);
   }
 
-  return { ok: true, result: parsed } as LlmResponseEnvelope;
+  return normalizeOpenClawEnvelope({ ok: true, result: parsed } as LlmResponseEnvelope);
+}
+
+function normalizeOpenClawEnvelope(envelope: LlmResponseEnvelope): LlmResponseEnvelope {
+  if (envelope.ok !== true) return envelope;
+  return {
+    ...envelope,
+    result: normalizeOpenClawResult(envelope.result),
+  };
+}
+
+function normalizeOpenClawResult(result: LlmResponse | null | undefined): LlmResponse | null | undefined {
+  if (!result || typeof result !== 'object') return result;
+  if (result.output && typeof result.output === 'object') return result;
+
+  const contentBlocks = Array.isArray((result as any).content) ? (result as any).content : [];
+  const text = contentBlocks
+    .filter((block: any) => block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
+    .map((block: any) => block.text)
+    .join('\n')
+    .trim() || null;
+
+  const details = (result as any).details && typeof (result as any).details === 'object'
+    ? (result as any).details
+    : null;
+  const structuredData = details?.json ?? parseJsonText(text);
+  const metadata = mergeObjects(result.metadata, details ? { openclawDetails: details } : null);
+  const diagnostics = mergeObjects(result.diagnostics, details?.provider ? { provider: details.provider } : null);
+  const model = result.model ?? details?.model ?? null;
+
+  return {
+    ...result,
+    model,
+    metadata,
+    diagnostics,
+    output: {
+      format: structuredData !== null && structuredData !== undefined ? 'json' : 'text',
+      text,
+      data: structuredData,
+    },
+  };
+}
+
+function parseJsonText(text: string | null) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function mergeObjects(base: Record<string, unknown> | null | undefined, extra: Record<string, unknown> | null | undefined) {
+  if (!base && !extra) return null;
+  return { ...base, ...extra };
 }
 
 async function invokeHttpAdapter({ endpoint, token, payload }: { endpoint: URL; token: string; payload: any }) {
