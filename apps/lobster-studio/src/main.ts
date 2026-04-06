@@ -13,21 +13,53 @@ import {
   updateArg,
   updateEnv,
   updateTaskField,
+  type EditorState,
 } from './editor-state.js';
-import { resolveGeneratedDraftHydration } from './generated-draft.js';
+import { parseWorkflowText, testWorkflowText } from './api.js';
+import { importWorkflowToEditorState } from './import.js';
 import { renderEditor } from './render.js';
 
-let state = createInitialEditorState();
-const generatedDraftHydration = resolveGeneratedDraftHydration(globalThis.location.href);
-if (generatedDraftHydration.kind === 'loaded') {
-  state = generatedDraftHydration.state;
-} else if (generatedDraftHydration.kind === 'error') {
-  state = setWorkflowField(state, 'copyStatus', generatedDraftHydration.message);
-}
+type WritableFileStream = {
+  write: (data: string) => Promise<void>;
+  close: () => Promise<void>;
+};
 
-const mount = document.querySelector<HTMLElement>('#app');
+type StudioFileHandle = {
+  name: string;
+  getFile: () => Promise<File>;
+  createWritable: () => Promise<WritableFileStream>;
+};
+
+type FilePickerWindow = Window & {
+  showOpenFilePicker?: (options?: {
+    multiple?: boolean;
+    excludeAcceptAllOption?: boolean;
+    types?: Array<{
+      description?: string;
+      accept?: Record<string, string[]>;
+    }>;
+  }) => Promise<StudioFileHandle[]>;
+};
+
+let state = createInitialEditorState();
+let fileHandle: StudioFileHandle | null = null;
+
+const mount = globalThis.document.querySelector<HTMLElement>('#app');
 if (!mount) {
   throw new Error('App mount node not found');
+}
+
+function setState(nextState: EditorState) {
+  state = nextState;
+  rerender();
+}
+
+function withDirtyStatus(nextState: EditorState) {
+  if (!nextState.hasFileBinding || !nextState.currentFileName) return nextState;
+  return {
+    ...nextState,
+    fileStatus: `Edited ${nextState.currentFileName}. Save to overwrite the file.`,
+  };
 }
 
 async function copyExport(text: string) {
@@ -48,75 +80,195 @@ async function copyExport(text: string) {
   rerender();
 }
 
+async function openWorkflowFile() {
+  const pickerWindow = globalThis.window as FilePickerWindow;
+  if (!pickerWindow.showOpenFilePicker) {
+    setState(setWorkflowField(state, 'fileStatus', 'Open requires a browser that supports the File System Access API.'));
+    return;
+  }
+
+  try {
+    const [handle] = await pickerWindow.showOpenFilePicker({
+      multiple: false,
+      excludeAcceptAllOption: true,
+      types: [{
+        description: 'Lobster workflows',
+        accept: {
+          'application/json': ['.lobster'],
+          'text/plain': ['.lobster'],
+          'application/yaml': ['.lobster'],
+        },
+      }],
+    });
+
+    if (!handle) return;
+
+    const file = await handle.getFile();
+    const response = await parseWorkflowText(await file.text());
+    if (!response.ok) {
+      setState(setWorkflowField(
+        state,
+        'fileStatus',
+        `Open failed: ${'error' in response ? response.error : 'Unable to parse the workflow.'}`,
+      ));
+      return;
+    }
+
+    fileHandle = handle;
+    setState(importWorkflowToEditorState(response.workflow, {
+      fileName: handle.name,
+      hasFileBinding: true,
+    }));
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') return;
+    setState(setWorkflowField(
+      state,
+      'fileStatus',
+      `Open failed: ${error instanceof Error ? error.message : String(error)}`,
+    ));
+  }
+}
+
+async function saveWorkflowFile(text: string) {
+  if (!fileHandle) {
+    try {
+      const fileName = state.currentFileName || 'workflow.lobster';
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = globalThis.document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      link.click();
+      URL.revokeObjectURL(url);
+      setState(setWorkflowField(state, 'fileStatus', `Downloaded ${fileName}.`));
+    } catch (error) {
+      setState(setWorkflowField(
+        state,
+        'fileStatus',
+        `Save failed: ${error instanceof Error ? error.message : String(error)}`,
+      ));
+    }
+    return;
+  }
+
+  try {
+    const writable = await fileHandle.createWritable();
+    await writable.write(text);
+    await writable.close();
+    setState(setWorkflowField(state, 'fileStatus', `Saved ${fileHandle.name}.`));
+  } catch (error) {
+    setState(setWorkflowField(
+      state,
+      'fileStatus',
+      `Save failed: ${error instanceof Error ? error.message : String(error)}`,
+    ));
+  }
+}
+
+async function runWorkflowTest(text: string) {
+  setState({
+    ...state,
+    testStatus: 'running',
+    testMessage: 'Running Lobster test...',
+  });
+
+  try {
+    const response = await testWorkflowText(text);
+    if (!response.ok) {
+      setState({
+        ...state,
+        testStatus: 'error',
+        testMessage: 'error' in response ? response.error : 'Unknown test failure.',
+      });
+      return;
+    }
+
+    const nextStatus = response.result.status === 'success'
+      ? 'success'
+      : response.result.status === 'unsupported-approval'
+        ? 'unsupported'
+        : 'error';
+
+    setState({
+      ...state,
+      testStatus: nextStatus,
+      testMessage: response.result.message,
+    });
+  } catch (error) {
+    setState({
+      ...state,
+      testStatus: 'error',
+      testMessage: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 function rerender() {
   renderEditor(mount, state, {
+    onOpenFile() {
+      void openWorkflowFile();
+    },
+    onSaveFile(_fileName, text) {
+      void saveWorkflowFile(text);
+    },
+    onRunTest(text) {
+      void runWorkflowTest(text);
+    },
     onWorkflowFieldChange(field, value) {
-      state = setWorkflowField(state, field, value);
+      state = withDirtyStatus(setWorkflowField(state, field, value));
       rerender();
     },
     onAddArg() {
-      state = addArg(state);
+      state = withDirtyStatus(addArg(state));
       rerender();
     },
     onUpdateArg(id, field, value) {
-      state = updateArg(state, id, field, value);
+      state = withDirtyStatus(updateArg(state, id, field, value));
       rerender();
     },
     onRemoveArg(id) {
-      state = removeArg(state, id);
+      state = withDirtyStatus(removeArg(state, id));
       rerender();
     },
     onAddEnv() {
-      state = addEnv(state);
+      state = withDirtyStatus(addEnv(state));
       rerender();
     },
     onUpdateEnv(id, field, value) {
-      state = updateEnv(state, id, field, value);
+      state = withDirtyStatus(updateEnv(state, id, field, value));
       rerender();
     },
     onRemoveEnv(id) {
-      state = removeEnv(state, id);
+      state = withDirtyStatus(removeEnv(state, id));
       rerender();
     },
     onAddTask() {
-      state = addTask(state);
+      state = withDirtyStatus(addTask(state));
       rerender();
     },
     onRemoveTask(index) {
-      state = removeTask(state, index);
+      state = withDirtyStatus(removeTask(state, index));
       rerender();
     },
     onMoveTask(index, direction) {
-      state = moveTask(state, index, direction);
+      state = withDirtyStatus(moveTask(state, index, direction));
       rerender();
     },
     onTaskFieldChange(index, field, value) {
-      state = updateTaskField(state, index, field, value);
+      state = withDirtyStatus(updateTaskField(state, index, field, value));
       rerender();
     },
     onExecutionModeChange(index, value) {
-      state = setTaskExecutionMode(state, index, value);
+      state = withDirtyStatus(setTaskExecutionMode(state, index, value));
       rerender();
     },
     onConditionFieldChange(index, value) {
-      state = setTaskConditionField(state, index, value);
+      state = withDirtyStatus(setTaskConditionField(state, index, value));
       rerender();
     },
     onCopyExport(text) {
       void copyExport(text);
     },
-    onDownloadExport(fileName, text) {
-      const blob = new Blob([text], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = fileName;
-      link.click();
-      URL.revokeObjectURL(url);
-      state = setWorkflowField(state, 'copyStatus', `Downloaded ${fileName}.`);
-      rerender();
-    },
   });
 }
-
 rerender();

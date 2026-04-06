@@ -3,6 +3,9 @@ import type { EditorState, EditorTask } from './editor-state.js';
 import { exportEditorState } from './export.js';
 
 type Actions = {
+  onOpenFile: () => void;
+  onSaveFile: (fileName: string, text: string) => void;
+  onRunTest: (text: string) => void;
   onWorkflowFieldChange: (field: 'name' | 'description', value: string) => void;
   onAddArg: () => void;
   onUpdateArg: (id: string, field: 'key' | 'defaultValue' | 'description', value: string) => void;
@@ -17,7 +20,6 @@ type Actions = {
   onExecutionModeChange: (index: number, value: SupportedExecutionMode) => void;
   onConditionFieldChange: (index: number, value: 'when' | 'condition') => void;
   onCopyExport: (text: string) => void;
-  onDownloadExport: (fileName: string, text: string) => void;
 };
 
 function escapeHtml(value: string) {
@@ -100,7 +102,7 @@ function renderTask(task: EditorTask, index: number, total: number) {
         </div>
         <div class="field-group">
           <label for="condition-text-${index}">Condition value</label>
-          <input id="condition-text-${index}" data-task-field="conditionText" value="${escapeHtml(task.conditionText)}" placeholder="$task_1.approved" />
+          <input id="condition-text-${index}" data-task-field="conditionText" value="${escapeHtml(task.conditionText)}" placeholder="$approve.approved" />
         </div>
       </div>
     </article>
@@ -119,16 +121,33 @@ export function renderEditor(root: HTMLElement, state: EditorState, actions: Act
     exportError = error instanceof Error ? error.message : String(error);
   }
 
+  const saveDisabled = !!exportError;
+  const testDisabled = !!exportError;
+  const testClass = state.testStatus === 'success'
+    ? 'status status--success'
+    : state.testStatus === 'error'
+      ? 'status status--error'
+      : state.testStatus === 'unsupported'
+        ? 'status status--warning'
+        : 'status';
+
   root.innerHTML = `
     <div class="page">
       <main class="panel">
         <section class="hero">
-          <div class="eyebrow">v0.2.0 authoring editor</div>
+          <div class="eyebrow">v0.2 maintenance editor</div>
           <h1>Lobster Studio</h1>
           <p>
-            Build ordered Lobster workflows as task cards, or start from a generated draft
-            handoff, then copy or download a <code>.lobster</code> file.
+            Open existing <code>.lobster</code> workflows, edit them as ordered task cards,
+            save back to disk, and run a minimal in-Studio test.
           </p>
+          <div class="hero-actions">
+            <button type="button" id="open-file">Open .lobster</button>
+          </div>
+          <div class="hero-meta">
+            <div><strong>Current file:</strong> ${escapeHtml(state.currentFileName || fileName)}</div>
+            <div><strong>File status:</strong> ${escapeHtml(exportError || state.fileStatus)}</div>
+          </div>
         </section>
 
         <section class="panel__section">
@@ -220,7 +239,7 @@ export function renderEditor(root: HTMLElement, state: EditorState, actions: Act
               <h2>Generated <code>.lobster</code></h2>
             </div>
             <div class="field-help">
-              Generated file name: <strong>${escapeHtml(fileName)}</strong>
+              Export target: <strong>${escapeHtml(fileName)}</strong>
             </div>
           </div>
           <div class="panel__section">
@@ -230,14 +249,27 @@ export function renderEditor(root: HTMLElement, state: EditorState, actions: Act
             </div>
             <div class="export-actions">
               <button type="button" id="copy-export" ${exportError ? 'disabled' : ''}>Copy .lobster</button>
-              <button type="button" id="download-export" ${exportError ? 'disabled' : ''}>Download .lobster</button>
             </div>
           </div>
           <div class="panel__section">
-            <div class="hint-card">
-              Success demo: create 3 tasks, configure args/env/stdin/when/command/pipeline,
-              then export one <code>.lobster</code> file.
+            <div class="section-header">
+              <h2>Test result</h2>
             </div>
+            <div class="session-actions">
+              <button type="button" id="run-test" ${testDisabled ? 'disabled' : ''}>Test</button>
+            </div>
+            <div class="${testClass}">${escapeHtml(state.testMessage)}</div>
+          </div>
+          <div class="panel__section">
+            <div class="hint-card">
+              Open/save uses the browser File System Access API. Test runs the current working copy
+              through the local Studio preview server.
+            </div>
+          </div>
+          <div class="panel__section panel__section--footer">
+            <button type="button" class="button-primary" id="save-file" ${saveDisabled ? 'disabled' : ''}>
+              Save
+            </button>
           </div>
         </section>
       </aside>
@@ -250,6 +282,14 @@ export function renderEditor(root: HTMLElement, state: EditorState, actions: Act
   (root.querySelector('#workflow-description') as HTMLTextAreaElement | null)?.addEventListener('change', (event) => {
     actions.onWorkflowFieldChange('description', (event.currentTarget as HTMLTextAreaElement).value ?? '');
   });
+
+  root.querySelector('#open-file')?.addEventListener('click', () => actions.onOpenFile());
+  if (!saveDisabled) {
+    root.querySelector('#save-file')?.addEventListener('click', () => actions.onSaveFile(fileName, text));
+  }
+  if (!testDisabled) {
+    root.querySelector('#run-test')?.addEventListener('click', () => actions.onRunTest(text));
+  }
 
   root.querySelector('#add-arg')?.addEventListener('click', () => actions.onAddArg());
   root.querySelector('#add-env')?.addEventListener('click', () => actions.onAddEnv());
@@ -304,6 +344,5 @@ export function renderEditor(root: HTMLElement, state: EditorState, actions: Act
 
   if (!exportError) {
     root.querySelector('#copy-export')?.addEventListener('click', () => actions.onCopyExport(text));
-    root.querySelector('#download-export')?.addEventListener('click', () => actions.onDownloadExport(fileName, text));
   }
 }

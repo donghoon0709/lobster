@@ -3,8 +3,11 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { handleStudioApiRequest } from './studio-api.mjs';
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(scriptDir, '../../../dist');
+const repoRoot = path.resolve(scriptDir, '../../..');
 const port = Number(process.env.PORT || 4173);
 
 const contentTypes = new Map([
@@ -17,6 +20,14 @@ const contentTypes = new Map([
 const server = http.createServer(async (req, res) => {
   try {
     const pathname = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`).pathname;
+    if (pathname.startsWith('/api/')) {
+      const handled = await handleStudioApiRequest(req, res, pathname, {
+        cwd: repoRoot,
+        env: process.env,
+      });
+      if (handled) return;
+    }
+
     if (pathname === '/') {
       res.writeHead(302, { location: '/apps/lobster-studio/' });
       res.end();

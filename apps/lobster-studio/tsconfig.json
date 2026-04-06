@@ -2,12 +2,13 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": [],
+    "types": ["node"],
     "rootDir": "../../",
     "outDir": "../../dist"
   },
   "include": [
     "src/**/*.ts",
+    "../../src/core/tool_runtime.ts",
     "../../src/workflows/types.ts",
     "../../src/workflows/serialize.ts",
     "../../src/workflows/generated_draft.ts"

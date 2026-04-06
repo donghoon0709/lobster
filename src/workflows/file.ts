@@ -1,6 +1,5 @@
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
-import { parse as parseYaml } from 'yaml';
 
 import { randomUUID } from 'node:crypto';
 import { PassThrough } from 'node:stream';
@@ -11,7 +10,7 @@ import { encodeToken } from '../token.js';
 import { deleteStateJson, readStateJson, writeStateJson } from '../state/store.js';
 import { readLineFromStream } from '../read_line.js';
 import { resolveInlineShellCommand } from '../shell.js';
-import { validateSupportedWorkflowFile } from './serialize.js';
+import { parseWorkflowFileText } from './parse.js';
 import type { WorkflowFile, WorkflowStep } from './types.js';
 
 export type { WorkflowApproval, WorkflowFile, WorkflowStep } from './types.js';
@@ -74,8 +73,7 @@ type WorkflowResumeState = {
 export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> {
   const text = await fsp.readFile(filePath, 'utf8');
   const ext = path.extname(filePath).toLowerCase();
-  const parsed = ext === '.json' ? JSON.parse(text) : parseYaml(text);
-  return validateSupportedWorkflowFile(parsed as WorkflowFile);
+  return parseWorkflowFileText(text, ext);
 }
 
 export function resolveWorkflowArgs(
