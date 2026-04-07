@@ -59,6 +59,9 @@ steps:
   assert.equal(result.ok, true);
   if (result.ok) {
     assert.equal(result.result.status, 'success');
+    assert.equal(Array.isArray(result.result.verboseTrace), true);
+    assert.equal(result.result.verboseTrace?.[0]?.stepId, 'hello');
+    assert.match(result.result.cliOutput ?? '', /Workflow step summary:/);
     assert.match(result.result.cliOutput ?? '', /\[\s*"ok"\s*\]/);
   }
 
@@ -78,9 +81,13 @@ steps:
   assert.equal(result.ok, true);
   if (result.ok) {
     assert.equal(result.result.status, 'error');
+    assert.equal(Array.isArray(result.result.verboseTrace), true);
+    assert.equal(result.result.verboseTrace?.[0]?.stepId, 'fail');
+    assert.match(result.result.cliOutput ?? '', /Workflow step summary:/);
     assert.match(result.result.message, /boom|exit/i);
     assert.match(result.result.cliOutput ?? '', /Workflow failed at step fail \[shell\]/);
-    assert.match(result.result.cliOutput ?? '', /stderr:/);
+    assert.equal(result.result.repairPlan?.classification, 'runtime');
+    assert.match(result.result.repairPlan?.suggestedEditRequest ?? '', /classified as runtime/i);
   }
 });
 
@@ -97,5 +104,6 @@ steps:
   assert.equal(result.ok, true);
   if (result.ok) {
     assert.equal(result.result.status, 'unsupported-approval');
+    assert.equal(result.result.repairPlan?.classification, 'approval');
   }
 });

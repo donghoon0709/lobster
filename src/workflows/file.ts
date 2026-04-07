@@ -10,6 +10,7 @@ import { encodeToken } from '../token.js';
 import { deleteStateJson, readStateJson, writeStateJson } from '../state/store.js';
 import { readLineFromStream } from '../read_line.js';
 import { resolveInlineShellCommand } from '../shell.js';
+import { normalizeSpawnEnv } from '../shell.js';
 import { parseWorkflowFileText } from './parse.js';
 import type { WorkflowFile, WorkflowStep } from './types.js';
 
@@ -707,7 +708,7 @@ async function runShellCommand({
   return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     const shell = resolveInlineShellCommand({ command, env });
     const child = spawn(shell.command, shell.argv, {
-      env,
+      env: normalizeSpawnEnv(env),
       cwd,
       signal,
       stdio: ['pipe', 'pipe', 'pipe'],

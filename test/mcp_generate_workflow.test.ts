@@ -13,7 +13,45 @@ import {
   skipOnServerLifecycleGap,
 } from './helpers/mcp_harness.js';
 
-test('generate_workflow_draft returns canonical .lobster text and Studio handoff when destination is omitted', async (t) => {
+test('mcp tools/list exposes generate, test, and reference tools only', async (t) => {
+  try {
+    const mcp = await createMcpHarness(t);
+    if (!mcp) return;
+    await mcp.initialize();
+
+    const tools = await mcp.listTools();
+    const names = tools.map((tool: { name: string }) => tool.name).sort();
+
+    assert.deepEqual(names, ['generate_workflow_draft', 'search_reference_docs', 'test_workflow']);
+  } catch (error) {
+    if (skipOnServerLifecycleGap(t, error)) return;
+    throw error;
+  }
+});
+
+test('search_reference_docs returns command-reference matches for llm.invoke', async (t) => {
+  try {
+    const mcp = await createMcpHarness(t);
+    if (!mcp) return;
+    await mcp.initialize();
+
+    const result = await mcp.callTool('search_reference_docs', {
+      query: 'llm.invoke',
+      areas: ['commands'],
+      maxResults: 3,
+    });
+
+    assert.equal(result.structuredContent?.kind, 'lobster.reference.search');
+    assert.equal(result.structuredContent?.results?.length > 0, true);
+    assert.equal(result.structuredContent?.results?.[0]?.area, 'commands');
+    assert.match(result.structuredContent?.results?.[0]?.snippet ?? '', /llm\.invoke/i);
+  } catch (error) {
+    if (skipOnServerLifecycleGap(t, error)) return;
+    throw error;
+  }
+});
+
+test('generate_workflow_draft returns canonical .lobster text and Studio handoff without validation metadata', async (t) => {
   try {
     const mcp = await createMcpHarness(t);
     if (!mcp) return;
@@ -25,14 +63,14 @@ test('generate_workflow_draft returns canonical .lobster text and Studio handoff
 
     await assertCanonicalWorkflowText(workflowText);
     assert.equal(handoff.url.startsWith('http'), true);
-    assert.equal(result.structuredContent?.validation?.status, 'validation_skipped');
+    assert.equal('validation' in (result.structuredContent ?? {}), false);
   } catch (error) {
     if (skipOnServerLifecycleGap(t, error)) return;
     throw error;
   }
 });
 
-test('generate_workflow_draft writes the requested file and still returns a Studio handoff when destination is provided', async (t) => {
+test('generate_workflow_draft writes the requested file in one pass', async (t) => {
   try {
     const mcp = await createMcpHarness(t);
     if (!mcp) return;
@@ -53,104 +91,101 @@ test('generate_workflow_draft writes the requested file and still returns a Stud
 
     await assertCanonicalWorkflowText(fileText);
     assert.equal(handoff.url.startsWith('http'), true);
-    assert.equal(result.structuredContent?.validation?.status, 'validation_skipped');
+    assert.equal('validation' in (result.structuredContent ?? {}), false);
   } catch (error) {
     if (skipOnServerLifecycleGap(t, error)) return;
     throw error;
   }
 });
 
-test('generate_workflow_draft can auto-validate a safe generated workflow', async (t) => {
+test('removed edit/apply workflow tools return unknown-tool errors', async (t) => {
   try {
-    const previous = process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT;
-    process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT = 'name: safe-flow\nsteps:\n  - id: hello\n    command: printf ok\n';
-    t.after(() => {
-      if (previous === undefined) {
-        delete process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT;
-      } else {
-        process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT = previous;
-      }
-    });
     const mcp = await createMcpHarness(t);
     if (!mcp) return;
     await mcp.initialize();
 
-    const result = await mcp.callTool('generate_workflow_draft', defaultGenerateWorkflowArgs());
+    await assert.rejects(
+      () => mcp.callTool('edit_existing_workflow', { filePath: 'x.lobster', request: 'anything' }),
+      /Unknown tool: edit_existing_workflow/i,
+    );
 
-    assert.equal(result.structuredContent?.validation?.status, 'validated');
-    assert.deepEqual(result.structuredContent?.validation?.attempts?.[0]?.output, ['ok']);
+    await assert.rejects(
+      () => mcp.callTool('apply_existing_workflow_edit', { sessionId: 'anything' }),
+      /Unknown tool: apply_existing_workflow_edit/i,
+    );
   } catch (error) {
     if (skipOnServerLifecycleGap(t, error)) return;
     throw error;
   }
 });
 
-test('generate_workflow_draft returns failure diagnostics and Studio handoff after retry exhaustion', async (t) => {
+test('test_workflow reports success for a passing workflow', async (t) => {
   try {
-    const previous = process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT;
-    process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT = 'name: broken-flow\nsteps:\n  - id: fail\n    command: cat missing-file.txt\n';
-    t.after(() => {
-      if (previous === undefined) {
-        delete process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT;
-      } else {
-        process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT = previous;
-      }
-    });
     const mcp = await createMcpHarness(t);
     if (!mcp) return;
     await mcp.initialize();
 
-    const result = await mcp.callTool('generate_workflow_draft', defaultGenerateWorkflowArgs({ maxRepairAttempts: 2 }));
-    const handoff = extractStudioHandoff(result);
-
-    assert.equal(result.structuredContent?.validation?.status, 'failed_after_retries');
-    assert.equal(result.structuredContent?.validation?.attempts?.length, 3);
-    assert.match(result.structuredContent?.validation?.attempts?.[2]?.cliOutput ?? '', /Workflow failed at step fail \[shell\]/);
-    assert.equal(handoff.url.startsWith('http'), true);
-  } catch (error) {
-    if (skipOnServerLifecycleGap(t, error)) return;
-    throw error;
-  }
-});
-
-test('edit_existing_workflow proposes edits without mutating the real file, and apply_existing_workflow_edit writes them back', async (t) => {
-  try {
-    const previous = process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT;
-    process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT = 'name: edited\nsteps:\n  - id: hello\n    command: printf bye\n';
-    t.after(() => {
-      if (previous === undefined) {
-        delete process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT;
-      } else {
-        process.env.LOBSTER_MCP_FAKE_WORKFLOW_TEXT = previous;
-      }
-    });
-    const mcp = await createMcpHarness(t);
-    if (!mcp) return;
-    await mcp.initialize();
-
-    const filePath = path.join(os.tmpdir(), `lobster-mcp-edit-${Date.now()}.lobster`);
-    await writeFile(filePath, 'name: original\nsteps:\n  - id: hello\n    command: printf hi\n', 'utf8');
+    const filePath = path.join(os.tmpdir(), `lobster-mcp-test-pass-${Date.now()}.lobster`);
+    await writeFile(filePath, 'name: pass\nsteps:\n  - id: hello\n    command: printf ok\n', 'utf8');
     t.after(async () => {
       await import('node:fs/promises').then(({ rm }) => rm(filePath, { force: true }));
     });
 
-    const proposed = await mcp.callTool('edit_existing_workflow', {
-      filePath,
-      request: 'Change the command to print bye.',
-      validate: false,
+    const result = await mcp.callTool('test_workflow', { filePath });
+
+    assert.equal(result.structuredContent?.success, true);
+    assert.equal(result.structuredContent?.status, 'success');
+    assert.equal(result.structuredContent?.reachedFinalStep, true);
+    assert.deepEqual(result.structuredContent?.output, ['ok']);
+  } catch (error) {
+    if (skipOnServerLifecycleGap(t, error)) return;
+    throw error;
+  }
+});
+
+test('test_workflow returns a repair plan for missing workflow args', async (t) => {
+  try {
+    const mcp = await createMcpHarness(t);
+    if (!mcp) return;
+    await mcp.initialize();
+
+    const filePath = path.join(os.tmpdir(), `lobster-mcp-test-missing-${Date.now()}.lobster`);
+    await writeFile(filePath, 'name: missing\nsteps:\n  - id: hello\n    command: printf ${name}\n', 'utf8');
+    t.after(async () => {
+      await import('node:fs/promises').then(({ rm }) => rm(filePath, { force: true }));
     });
 
-    assert.match(await readFile(filePath, 'utf8'), /printf hi/);
-    assert.match(proposed.structuredContent?.diff ?? '', /\+    command: "?printf bye"?/);
-    assert.ok(proposed.structuredContent?.applySessionId);
-    assert.ok(proposed.structuredContent?.studio?.url);
+    const result = await mcp.callTool('test_workflow', { filePath });
 
-    const applied = await mcp.callTool('apply_existing_workflow_edit', {
-      sessionId: proposed.structuredContent?.applySessionId,
+    assert.equal(result.structuredContent?.success, false);
+    assert.equal(result.structuredContent?.repairPlan?.classification, 'missing_inputs');
+    assert.deepEqual(result.structuredContent?.repairPlan?.missingArgs, ['name']);
+    assert.match(result.structuredContent?.repairPlan?.suggestedEditRequest ?? '', /name/);
+  } catch (error) {
+    if (skipOnServerLifecycleGap(t, error)) return;
+    throw error;
+  }
+});
+
+test('test_workflow returns runtime evidence and a repair plan for failing workflows', async (t) => {
+  try {
+    const mcp = await createMcpHarness(t);
+    if (!mcp) return;
+    await mcp.initialize();
+
+    const filePath = path.join(os.tmpdir(), `lobster-mcp-test-fail-${Date.now()}.lobster`);
+    await writeFile(filePath, 'name: fail\nsteps:\n  - id: boom\n    command: cat missing-file.txt\n', 'utf8');
+    t.after(async () => {
+      await import('node:fs/promises').then(({ rm }) => rm(filePath, { force: true }));
     });
 
-    assert.equal(applied.structuredContent?.applied, true);
-    assert.match(await readFile(filePath, 'utf8'), /printf bye/);
+    const result = await mcp.callTool('test_workflow', { filePath });
+
+    assert.equal(result.structuredContent?.success, false);
+    assert.equal(result.structuredContent?.status, 'error');
+    assert.equal(result.structuredContent?.repairPlan?.classification, 'runtime');
+    assert.match(result.structuredContent?.cliOutput ?? '', /Workflow failed at step boom \[shell\]/);
+    assert.ok(result.structuredContent?.repairPlan?.evidence?.trace);
   } catch (error) {
     if (skipOnServerLifecycleGap(t, error)) return;
     throw error;

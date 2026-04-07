@@ -156,6 +156,7 @@ Detailed reference docs live under [`docs/`](./docs/README.md):
 - workflow-file authoring: [`docs/lobster-file-syntax.md`](./docs/lobster-file-syntax.md)
 - top-level CLI reference: [`docs/cli-reference.md`](./docs/cli-reference.md)
 - registry command reference: [`docs/command-reference.md`](./docs/command-reference.md)
+- MCP server reference: [`docs/mcp-server.md`](./docs/mcp-server.md)
 
 ### Notes
 
@@ -181,11 +182,30 @@ lobster-mcp
 pnpm mcp:serve
 ```
 
-The primary MCP tool is `generate_workflow_draft`. It:
+The MCP surface is intentionally small and now exposes **three tools only**:
+
+### `search_reference_docs`
+- searches the checked-in docs under `docs/`
+- helps external agents find implemented details for internal CLI commands and `.lobster` syntax
+- returns matching source paths, headings, snippets, and scores
+
+### `generate_workflow_draft`
 - accepts a natural-language workflow request
 - produces canonical `.lobster` text
 - optionally writes the generated file when a destination is provided
 - returns a Lobster Studio generated-draft handoff URL so the result can be opened in Studio immediately
+
+### `test_workflow`
+- executes an existing `.lobster` workflow file
+- reports pass/fail without mutating the source file
+- returns a structured `repairPlan` on failure so an external agent can decide how to fix the workflow
+- returns `cliOutput` from `lobster run --verbose` plus a structured `verboseTrace`
+
+The MCP server no longer exposes workflow-editing tools. In particular:
+- `edit_existing_workflow` has been removed
+- `apply_existing_workflow_edit` has been removed
+
+See [`docs/mcp-server.md`](./docs/mcp-server.md) for the full request/response contract and migration notes.
 
 ## Next steps
 

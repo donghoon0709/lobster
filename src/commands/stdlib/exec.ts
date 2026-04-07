@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { resolveInlineShellCommand } from '../../shell.js';
+import { normalizeSpawnEnv } from '../../shell.js';
 
 export const execCommand = {
   name: 'exec',
@@ -75,7 +76,7 @@ export const execCommand = {
 function runProcess(command, argv, { env, cwd, stdin, signal }) {
   return new Promise<any>((resolve, reject) => {
     const child = spawn(command, argv, {
-      env,
+      env: normalizeSpawnEnv(env ?? process.env),
       cwd,
       signal,
       stdio: ['pipe', 'pipe', 'pipe'],

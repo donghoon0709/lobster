@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { promises as fsp } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import { generateWorkflowDraft } from '../src/workflows/generate_draft.js';
 
@@ -48,7 +51,7 @@ function createCtx(responses: unknown[]) {
   };
 }
 
-test('generateWorkflowDraft keeps generation-only behavior when validation is disabled', async () => {
+test('generateWorkflowDraft is a one-shot generation flow without validation metadata', async () => {
   const result = await generateWorkflowDraft({
     request: 'Generate a simple echo workflow.',
     ctx: createCtx([{
@@ -62,41 +65,19 @@ test('generateWorkflowDraft keeps generation-only behavior when validation is di
     }]),
   });
 
-  assert.equal(result.validation.status, 'generation_only');
   assert.equal(result.text.includes('printf ok'), true);
   assert.equal(result.studio.url.startsWith('http'), true);
+  assert.equal('validation' in result, false);
 });
 
-test('generateWorkflowDraft marks approval workflows as validation_skipped', async () => {
+test('generateWorkflowDraft writes the destination file in one pass', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-generate-draft-'));
+  const destination = path.join(tmpDir, 'generated.lobster');
   const result = await generateWorkflowDraft({
-    request: 'Generate a workflow that needs approval.',
-    validation: {
-      enabled: true,
-    },
+    request: 'Generate a simple echo workflow.',
+    destination,
     ctx: createCtx([{
-      name: 'approval-flow',
-      steps: [
-        {
-          id: 'approve',
-          approval: 'Proceed?',
-        },
-      ],
-    }]),
-  });
-
-  assert.equal(result.validation.status, 'validation_skipped');
-  assert.match(result.validation.blockedReason ?? '', /approval workflows/i);
-  assert.equal(result.studio.url.startsWith('http'), true);
-});
-
-test('generateWorkflowDraft validates a safe workflow when validation is enabled', async () => {
-  const result = await generateWorkflowDraft({
-    request: 'Generate a safe workflow.',
-    validation: {
-      enabled: true,
-    },
-    ctx: createCtx([{
-      name: 'safe-flow',
+      name: 'echo-flow',
       steps: [
         {
           id: 'hello',
@@ -106,33 +87,39 @@ test('generateWorkflowDraft validates a safe workflow when validation is enabled
     }]),
   });
 
-  assert.equal(result.validation.status, 'validated');
-  assert.equal(result.validation.attempts.length, 1);
-  assert.deepEqual(result.validation.attempts[0]?.output, ['ok']);
+  assert.equal(await fsp.readFile(destination, 'utf8'), result.text);
+  assert.equal(result.filePath, destination);
+  assert.equal('validation' in result, false);
 });
 
-test('generateWorkflowDraft retries and returns failed_after_retries with diagnostics', async () => {
-  const result = await generateWorkflowDraft({
-    request: 'Generate a failing workflow.',
-    validation: {
-      enabled: true,
-      maxRepairAttempts: 2,
-    },
-    ctx: createCtx([
-      {
-        name: 'broken-flow',
-        steps: [
-          {
-            id: 'fail',
-            command: 'cat missing-file.txt',
+test('generateWorkflowDraft surfaces malformed llm output directly without repair retries', async () => {
+  await assert.rejects(
+    () => generateWorkflowDraft({
+      request: 'Generate a workflow.',
+      ctx: {
+        ...createCtx([]),
+        registry: {
+          get(name: string) {
+            if (name !== 'llm.invoke') return null;
+            return {
+              async run() {
+                return {
+                  output: asStream([{
+                    kind: 'llm.invoke',
+                    source: 'stub',
+                    model: 'stub-model',
+                    cached: false,
+                    output: {
+                      text: '{not json',
+                    },
+                  }]),
+                };
+              },
+            };
           },
-        ],
+        },
       },
-    ]),
-  });
-
-  assert.equal(result.validation.status, 'failed_after_retries');
-  assert.equal(result.validation.attempts.length, 3);
-  assert.match(result.validation.attempts.at(-1)?.cliOutput ?? '', /Workflow failed at step fail \[shell\]/);
-  assert.equal(result.studio.url.startsWith('http'), true);
+    }),
+    /non-JSON draft text/i,
+  );
 });
