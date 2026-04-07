@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
+import { normalizeSpawnEnv } from "../../shell.js";
 
 function run(cmd: string, argv: string[], env: Record<string, string | undefined>, cwd?: string) {
   return new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
     const child = spawn(cmd, argv, {
-      env: { ...process.env, ...env },
+      env: normalizeSpawnEnv({ ...process.env, ...env }),
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
     });

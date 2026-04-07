@@ -1,11 +1,29 @@
 import type { WorkflowFile } from '../../../src/workflows/types.js';
+import type { WorkflowStepTrace } from '../../../src/workflows/file.js';
 
 export type ParseWorkflowResponse =
   | { ok: true; workflow: WorkflowFile }
   | { ok: false; error: string };
 
 export type StudioTestResponse =
-  | { ok: true; result: { status: 'success' | 'error' | 'unsupported-approval'; message: string; output?: unknown[]; cliOutput?: string } }
+  | {
+    ok: true;
+    result: {
+      status: 'success' | 'error' | 'unsupported-approval';
+      message: string;
+      output?: unknown[];
+      verboseTrace?: WorkflowStepTrace[];
+      cliOutput?: string;
+      repairPlan?: {
+        classification: string;
+        summary: string;
+        evidence: Record<string, unknown>;
+        suggestedEditRequest: string;
+        missingArgs?: string[];
+        missingEnv?: string[];
+      };
+    };
+  }
   | { ok: false; error: string };
 
 async function postJson<T>(url: string, body: Record<string, unknown>): Promise<T> {

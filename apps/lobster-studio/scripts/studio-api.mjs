@@ -1,6 +1,5 @@
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -17,35 +16,23 @@ function resolveRuntimeModule(relativeCandidates) {
   throw new Error(`Unable to locate Studio runtime module from ${fileURLToPath(import.meta.url)}`);
 }
 
-function resolveRuntimePath(relativeCandidates) {
-  for (const candidate of relativeCandidates) {
-    const candidatePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), candidate);
-    if (existsSync(candidatePath)) {
-      return candidatePath;
-    }
-  }
-  throw new Error(`Unable to locate Studio runtime path from ${fileURLToPath(import.meta.url)}`);
-}
-
-const distToolRuntimeUrl = resolveRuntimeModule([
-  '../../../dist/src/core/tool_runtime.js',
-  '../../../src/core/tool_runtime.js',
-]);
 const distWorkflowUrl = resolveRuntimeModule([
   '../../../dist/src/workflows/file.js',
   '../../../src/workflows/file.js',
 ]);
-const lobsterCliPath = resolveRuntimePath([
-  '../../../bin/lobster.js',
-  '../../../../bin/lobster.js',
+const distWorkflowTestUrl = resolveRuntimeModule([
+  '../../../dist/src/workflows/test_workflow.js',
+  '../../../src/workflows/test_workflow.js',
+  '../../../../dist/src/workflows/test_workflow.js',
+  '../../../../src/workflows/test_workflow.js',
 ]);
 
 async function loadModules() {
-  const [{ runToolRequest }, { loadWorkflowFile }] = await Promise.all([
-    import(distToolRuntimeUrl),
+  const [{ loadWorkflowFile }, { testWorkflow }] = await Promise.all([
     import(distWorkflowUrl),
+    import(distWorkflowTestUrl),
   ]);
-  return { runToolRequest, loadWorkflowFile };
+  return { loadWorkflowFile, testWorkflow };
 }
 
 function jsonResponse(res, statusCode, payload) {
@@ -115,48 +102,44 @@ export function normalizeStudioTestEnvelope(envelope) {
   };
 }
 
-async function runStudioHumanCli({
-  filePath,
-  cwd,
-  env,
-}) {
-  return await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [lobsterCliPath, 'run', '--file', filePath], {
-      cwd,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk;
-    });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      resolve({
-        code,
-        stdout,
-        stderr,
-      });
-    });
-  });
-}
-
-function formatStudioCliOutput(result) {
-  const sections = [];
-  if (result.stderr?.trim()) {
-    sections.push(result.stderr.trim());
+function normalizeStudioWorkflowTestResult(result) {
+  if (result.success) {
+    return {
+      status: 'success',
+      message: result.message || 'Lobster test passed.',
+      ...(Array.isArray(result.output) ? { output: result.output } : null),
+      ...(Array.isArray(result.verboseTrace) ? { verboseTrace: result.verboseTrace } : null),
+      ...(result.cliOutput ? { cliOutput: result.cliOutput } : null),
+    };
   }
-  if (result.stdout?.trim()) {
-    sections.push(result.stdout.trim());
+
+  if (result.status === 'unsupported-approval') {
+    return {
+      status: 'unsupported-approval',
+      message: result.message || 'Approval-required workflows are not supported in Lobster Studio tests yet.',
+      ...(Array.isArray(result.verboseTrace) ? { verboseTrace: result.verboseTrace } : null),
+      ...(result.cliOutput ? { cliOutput: result.cliOutput } : null),
+      ...(result.repairPlan ? { repairPlan: result.repairPlan } : null),
+    };
   }
-  return sections.join('\n\n');
+
+  if (result.status === 'cancelled') {
+    return {
+      status: 'error',
+      message: result.message || 'Studio test was cancelled.',
+      ...(Array.isArray(result.verboseTrace) ? { verboseTrace: result.verboseTrace } : null),
+      ...(result.cliOutput ? { cliOutput: result.cliOutput } : null),
+      ...(result.repairPlan ? { repairPlan: result.repairPlan } : null),
+    };
+  }
+
+  return {
+    status: 'error',
+    message: result.message || result.error || 'Studio test failed.',
+    ...(Array.isArray(result.verboseTrace) ? { verboseTrace: result.verboseTrace } : null),
+    ...(result.cliOutput ? { cliOutput: result.cliOutput } : null),
+    ...(result.repairPlan ? { repairPlan: result.repairPlan } : null),
+  };
 }
 
 export async function runStudioWorkflowTest({
@@ -165,9 +148,9 @@ export async function runStudioWorkflowTest({
   env = process.env,
   tempRoot = os.tmpdir(),
 }) {
-  const { runToolRequest } = await loadModules();
+  const { testWorkflow } = await loadModules();
   try {
-    const envelope = await withTemporaryWorkflow(text, tempRoot, async (filePath) => runToolRequest({
+    const result = await withTemporaryWorkflow(text, tempRoot, async (filePath) => testWorkflow({
       filePath,
       ctx: {
         cwd,
@@ -175,20 +158,10 @@ export async function runStudioWorkflowTest({
         mode: 'tool',
       },
     }));
-    const cliResult = await withTemporaryWorkflow(text, tempRoot, async (filePath) => runStudioHumanCli({
-      filePath,
-      cwd,
-      env,
-    }));
-    const normalized = normalizeStudioTestEnvelope(envelope);
-    const cliOutput = formatStudioCliOutput(cliResult);
 
     return {
       ok: true,
-      result: {
-        ...normalized,
-        ...(cliOutput ? { cliOutput } : null),
-      },
+      result: normalizeStudioWorkflowTestResult(result),
     };
   } catch (error) {
     return {

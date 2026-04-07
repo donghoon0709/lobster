@@ -2,8 +2,9 @@ import { Writable } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 
 import { createDefaultRegistry } from '../commands/registry.js';
-import { applyExistingWorkflowEdit, editExistingWorkflow } from '../workflows/edit_existing.js';
+import { searchReferenceDocs } from './reference_docs.js';
 import { generateWorkflowDraft } from '../workflows/generate_draft.js';
+import { testWorkflow } from '../workflows/test_workflow.js';
 
 type JsonRpcRequest = {
   jsonrpc?: string;
@@ -42,44 +43,44 @@ const GENERATE_TOOL: ToolDefinition = {
       provider: { type: 'string', description: 'Optional llm.invoke provider override' },
       model: { type: 'string', description: 'Optional llm.invoke model override' },
       studioUrl: { type: 'string', description: 'Optional Lobster Studio base URL override' },
-      validate: { type: 'boolean', description: 'Enable conditional auto-validation and bounded self-repair (default: true for MCP).' },
-      workflowArgs: { type: 'object', description: 'Optional workflow args used for validation execution when needed.' },
-      maxRepairAttempts: { type: 'number', description: 'Optional retry cap for repair attempts (max 3).' },
     },
     required: ['request'],
     additionalProperties: false,
   },
 };
 
-const EDIT_TOOL: ToolDefinition = {
-  name: 'edit_existing_workflow',
-  description: 'Edit an existing .lobster workflow by explicit path, self-test it on a temporary working copy, and return review artifacts without mutating the real file.',
+const TEST_TOOL: ToolDefinition = {
+  name: 'test_workflow',
+  description: 'Execute an existing .lobster workflow, report pass/fail, and return a repair plan when the run does not complete cleanly.',
   inputSchema: {
     type: 'object',
     properties: {
       filePath: { type: 'string', description: 'Explicit path to the existing .lobster file.' },
-      request: { type: 'string', description: 'Natural-language edit request.' },
-      provider: { type: 'string', description: 'Optional llm.invoke provider override' },
-      model: { type: 'string', description: 'Optional llm.invoke model override' },
-      studioUrl: { type: 'string', description: 'Optional Lobster Studio base URL override' },
-      validate: { type: 'boolean', description: 'Enable conditional self-test/self-fix on a temporary working copy (default: true).' },
-      workflowArgs: { type: 'object', description: 'Optional workflow args used for validation execution when needed.' },
-      maxRepairAttempts: { type: 'number', description: 'Optional retry cap for self-fix attempts (max 3).' },
+      workflowArgs: { type: 'object', description: 'Optional workflow args used for execution.' },
     },
-    required: ['filePath', 'request'],
+    required: ['filePath'],
     additionalProperties: false,
   },
 };
 
-const APPLY_EDIT_TOOL: ToolDefinition = {
-  name: 'apply_existing_workflow_edit',
-  description: 'Apply a previously proposed existing-workflow edit to the real .lobster file after explicit approval.',
+const REFERENCE_TOOL: ToolDefinition = {
+  name: 'search_reference_docs',
+  description: 'Search Lobster documentation for CLI commands, workflow-file syntax, and MCP reference details.',
   inputSchema: {
     type: 'object',
     properties: {
-      sessionId: { type: 'string', description: 'Internal apply/edit session identifier returned by edit_existing_workflow.' },
+      query: { type: 'string', description: 'Search query for Lobster docs content.' },
+      areas: {
+        type: 'array',
+        description: 'Optional documentation areas to search.',
+        items: {
+          type: 'string',
+          enum: ['overview', 'cli', 'commands', 'syntax', 'mcp'],
+        },
+      },
+      maxResults: { type: 'number', description: 'Optional max result count (default 5, max 10).' },
     },
-    required: ['sessionId'],
+    required: ['query'],
     additionalProperties: false,
   },
 };
@@ -99,11 +100,9 @@ function envelopeToToolResult(envelope: any) {
   };
 }
 
-function editResultToToolResult(result: any) {
-  const userFacing = { ...result };
-  delete userFacing.applySessionId;
+function structuredToolResult(result: any) {
   return {
-    content: [{ type: 'text', text: JSON.stringify(userFacing, null, 2) }],
+    content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
     structuredContent: result,
     isError: false,
   };
@@ -136,14 +135,14 @@ async function handleRequest(request: JsonRpcRequest) {
     return {
       jsonrpc: '2.0',
       id: request.id ?? null,
-      result: { tools: [GENERATE_TOOL, EDIT_TOOL, APPLY_EDIT_TOOL] },
+      result: { tools: [GENERATE_TOOL, TEST_TOOL, REFERENCE_TOOL] },
     };
   }
 
   if (request.method === 'tools/call') {
     const params = request.params ?? {};
     const name = params.name;
-    if (![GENERATE_TOOL.name, EDIT_TOOL.name, APPLY_EDIT_TOOL.name].includes(String(name))) {
+    if (![GENERATE_TOOL.name, TEST_TOOL.name, REFERENCE_TOOL.name].includes(String(name))) {
       return {
         jsonrpc: '2.0',
         id: request.id ?? null,
@@ -168,35 +167,28 @@ async function handleRequest(request: JsonRpcRequest) {
           studioBaseUrl: typeof args.studioUrl === 'string' ? args.studioUrl : undefined,
           provider: typeof args.provider === 'string' ? args.provider : undefined,
           model: typeof args.model === 'string' ? args.model : undefined,
-          validation: {
-            enabled: typeof args.validate === 'boolean' ? args.validate : true,
-            workflowArgs: args.workflowArgs && typeof args.workflowArgs === 'object' ? args.workflowArgs : undefined,
-            maxRepairAttempts: typeof args.maxRepairAttempts === 'number' ? args.maxRepairAttempts : undefined,
-          },
           ctx: runtimeCtx,
         })
-        : name === EDIT_TOOL.name
-          ? await editExistingWorkflow({
+        : name === TEST_TOOL.name
+          ? await testWorkflow({
             filePath: String(args.filePath ?? '').trim(),
-            request: String(args.request ?? '').trim(),
-            studioBaseUrl: typeof args.studioUrl === 'string' ? args.studioUrl : undefined,
-            provider: typeof args.provider === 'string' ? args.provider : undefined,
-            model: typeof args.model === 'string' ? args.model : undefined,
-            validation: {
-              enabled: typeof args.validate === 'boolean' ? args.validate : true,
-              workflowArgs: args.workflowArgs && typeof args.workflowArgs === 'object' ? args.workflowArgs : undefined,
-              maxRepairAttempts: typeof args.maxRepairAttempts === 'number' ? args.maxRepairAttempts : undefined,
-            },
+            workflowArgs: args.workflowArgs && typeof args.workflowArgs === 'object' ? args.workflowArgs : undefined,
             ctx: runtimeCtx,
           })
-          : await applyExistingWorkflowEdit({
-            sessionId: String(args.sessionId ?? '').trim(),
-            ctx: runtimeCtx,
+          : searchReferenceDocs({
+            query: String(args.query ?? '').trim(),
+            areas: Array.isArray(args.areas)
+              ? args.areas.filter((value): value is 'overview' | 'cli' | 'commands' | 'syntax' | 'mcp' =>
+                ['overview', 'cli', 'commands', 'syntax', 'mcp'].includes(String(value)))
+              : undefined,
+            maxResults: typeof args.maxResults === 'number' ? args.maxResults : undefined,
           });
       return {
         jsonrpc: '2.0',
         id: request.id ?? null,
-        result: name === EDIT_TOOL.name ? editResultToToolResult(result) : envelopeToToolResult(result),
+        result: name === TEST_TOOL.name || name === REFERENCE_TOOL.name
+          ? structuredToolResult(result)
+          : envelopeToToolResult(result),
       };
     } catch (error) {
       return {
