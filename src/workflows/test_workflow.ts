@@ -13,6 +13,7 @@ import {
   type WorkflowRunResult,
   type WorkflowStepTrace,
 } from './file.js';
+import type { WorkflowForEachStep, WorkflowStep } from './types.js';
 
 const SUCCESS_MESSAGE = 'Workflow reached the final step successfully.';
 
@@ -80,18 +81,43 @@ function normalizeArgEnvKey(key: string): string | null {
   return normalized || null;
 }
 
+function isForEachStep(step: WorkflowStep): step is WorkflowForEachStep {
+  return 'for_each' in step;
+}
+
+function visitStepStrings(step: WorkflowStep, visit: (value: string | undefined) => void) {
+  if (isForEachStep(step)) {
+    visit(step.for_each);
+    if (typeof step.when === 'string') visit(step.when);
+    if (typeof step.condition === 'string') visit(step.condition);
+    for (const child of step.steps) {
+      visit(child.command);
+      visit(child.run);
+      visit(child.pipeline);
+      if (typeof child.stdin === 'string') visit(child.stdin);
+      if (typeof child.when === 'string') visit(child.when);
+      if (typeof child.condition === 'string') visit(child.condition);
+      visit(child.cwd);
+      for (const value of Object.values(child.env ?? {})) visit(value);
+    }
+    return;
+  }
+
+  visit(step.command);
+  visit(step.run);
+  visit(step.pipeline);
+  if (typeof step.stdin === 'string') visit(step.stdin);
+  if (typeof step.when === 'string') visit(step.when);
+  if (typeof step.condition === 'string') visit(step.condition);
+  visit(step.cwd);
+  for (const value of Object.values(step.env ?? {})) visit(value);
+}
+
 function visitWorkflowStrings(workflow: WorkflowFile, visit: (value: string | undefined) => void) {
   visit(workflow.cwd);
   for (const value of Object.values(workflow.env ?? {})) visit(value);
   for (const step of workflow.steps) {
-    visit(step.command);
-    visit(step.run);
-    visit(step.pipeline);
-    if (typeof step.stdin === 'string') visit(step.stdin);
-    if (typeof step.when === 'string') visit(step.when);
-    if (typeof step.condition === 'string') visit(step.condition);
-    visit(step.cwd);
-    for (const value of Object.values(step.env ?? {})) visit(value);
+    visitStepStrings(step, visit);
   }
 }
 

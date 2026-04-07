@@ -13,8 +13,13 @@ export type WorkflowApproval =
     preview?: string;
   };
 
-export type WorkflowStep = {
+type WorkflowStepBase = {
   id: string;
+  condition?: unknown;
+  when?: unknown;
+};
+
+export type WorkflowExecutionStep = WorkflowStepBase & {
   command?: string;
   run?: string;
   pipeline?: string;
@@ -22,9 +27,23 @@ export type WorkflowStep = {
   cwd?: string;
   stdin?: unknown;
   approval?: WorkflowApproval;
-  condition?: unknown;
-  when?: unknown;
 };
+
+export type WorkflowLoopChildStep = WorkflowExecutionStep;
+
+export type WorkflowForEachStep = WorkflowStepBase & {
+  for_each: string;
+  steps: WorkflowLoopChildStep[];
+  command?: never;
+  run?: never;
+  pipeline?: never;
+  env?: never;
+  cwd?: never;
+  stdin?: never;
+  approval?: never;
+};
+
+export type WorkflowStep = WorkflowExecutionStep | WorkflowForEachStep;
 
 export type WorkflowFile = {
   name?: string;

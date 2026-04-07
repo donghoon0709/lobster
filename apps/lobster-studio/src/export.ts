@@ -5,7 +5,9 @@ import {
 } from '../../../src/workflows/serialize.js';
 import type {
   WorkflowArgDefinition,
+  WorkflowExecutionStep,
   WorkflowFile,
+  WorkflowForEachStep,
   WorkflowStep,
 } from '../../../src/workflows/types.js';
 import type { EditorState, EditorTask } from './editor-state.js';
@@ -51,8 +53,16 @@ function sanitizeStepId(rawId: string, index: number) {
   return trimmed || `task_${index + 1}`;
 }
 
-function buildStep(task: EditorTask, index: number): WorkflowStep {
-  let step: WorkflowStep = {
+function buildLeafStep(
+  task: EditorTask,
+  index: number,
+  {
+    allowApproval,
+  }: {
+    allowApproval: boolean;
+  },
+): WorkflowExecutionStep {
+  let step: WorkflowExecutionStep = {
     id: sanitizeStepId(task.id, index),
   };
 
@@ -64,15 +74,19 @@ function buildStep(task: EditorTask, index: number): WorkflowStep {
     step.pipeline = task.pipeline.trim();
   }
 
-  if (task.passthrough.approvalObject
-    && task.approvalPrompt === stringifyEditorValue(task.passthrough.approvalObject.prompt)) {
-    step.approval = task.passthrough.approvalObject;
-  } else if (task.passthrough.approvalScalar && task.approvalPrompt.trim() === '') {
-    step.approval = task.passthrough.approvalScalar;
-  } else if (task.executionMode === 'approval-only') {
-    step.approval = task.approvalPrompt.trim() || 'required';
-  } else if (task.approvalPrompt.trim()) {
-    step.approval = task.approvalPrompt.trim();
+  if (allowApproval) {
+    if (task.passthrough.approvalObject
+      && task.approvalPrompt === stringifyEditorValue(task.passthrough.approvalObject.prompt)) {
+      step.approval = task.passthrough.approvalObject;
+    } else if (task.passthrough.approvalScalar && task.approvalPrompt.trim() === '') {
+      step.approval = task.passthrough.approvalScalar;
+    } else if (task.executionMode === 'approval-only') {
+      step.approval = task.approvalPrompt.trim() || 'required';
+    } else if (task.approvalPrompt.trim()) {
+      step.approval = task.approvalPrompt.trim();
+    }
+  } else if (task.executionMode === 'approval-only' || task.approvalPrompt.trim()) {
+    throw new Error(`Loop child step ${sanitizeStepId(task.id, index)} cannot define approval`);
   }
 
   if (task.passthrough.rawStdin !== undefined && task.stdin === stringifyEditorValue(task.passthrough.rawStdin)) {
@@ -96,6 +110,28 @@ function buildStep(task: EditorTask, index: number): WorkflowStep {
   }
 
   return step;
+}
+
+function buildStep(task: EditorTask, index: number): WorkflowStep {
+  if (task.kind === 'for-each') {
+    if (!task.childTasks.length) {
+      throw new Error(`Loop step ${sanitizeStepId(task.id, index)} requires at least one child task`);
+    }
+    let loopStep: WorkflowForEachStep = {
+      id: sanitizeStepId(task.id, index),
+      for_each: task.forEach.trim(),
+      steps: task.childTasks.map((child, childIndex) => buildLeafStep(child, childIndex, { allowApproval: false })),
+    };
+    if (task.passthrough.rawConditionValue !== undefined
+      && task.conditionText === stringifyEditorValue(task.passthrough.rawConditionValue)) {
+      loopStep = setConditionalField(loopStep, task.conditionField, task.passthrough.rawConditionValue) as WorkflowForEachStep;
+    } else {
+      loopStep = setConditionalField(loopStep, task.conditionField, task.conditionText.trim()) as WorkflowForEachStep;
+    }
+    return loopStep;
+  }
+
+  return buildLeafStep(task, index, { allowApproval: true }) as WorkflowStep;
 }
 
 export function editorStateToWorkflowFile(state: EditorState): WorkflowFile {

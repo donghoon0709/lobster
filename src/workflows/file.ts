@@ -12,7 +12,13 @@ import { readLineFromStream } from '../read_line.js';
 import { resolveInlineShellCommand } from '../shell.js';
 import { normalizeSpawnEnv } from '../shell.js';
 import { parseWorkflowFileText } from './parse.js';
-import type { WorkflowFile, WorkflowStep } from './types.js';
+import type {
+  WorkflowExecutionStep,
+  WorkflowFile,
+  WorkflowForEachStep,
+  WorkflowLoopChildStep,
+  WorkflowStep,
+} from './types.js';
 
 export type { WorkflowApproval, WorkflowFile, WorkflowStep } from './types.js';
 
@@ -27,7 +33,7 @@ export type WorkflowStepResult = {
 
 export type WorkflowStepTrace = {
   stepId: string;
-  stepType: 'shell' | 'pipeline' | 'approval-only';
+  stepType: 'shell' | 'pipeline' | 'approval-only' | 'loop';
   status: 'succeeded' | 'failed' | 'skipped' | 'approved' | 'pending-approval';
   originalText?: string;
   resolvedText?: string;
@@ -83,6 +89,32 @@ type WorkflowResumeState = {
   approvalStepId?: string;
   createdAt: string;
 };
+
+type ResultScope = Record<string, WorkflowStepResult>;
+
+type ExecutionScopes = {
+  local: ResultScope;
+  outer?: ResultScope;
+};
+
+type StepExecutionContext = {
+  filePath: string;
+  workflow: WorkflowFile;
+  args: Record<string, unknown>;
+  ctx: RunContext;
+  topLevelResults: ResultScope;
+  scopes: ExecutionScopes;
+  trace: WorkflowStepTrace[];
+  implicitStdin?: unknown;
+  loopContext?: {
+    loopStepId: string;
+    iterationIndex: number;
+  };
+};
+
+function isForEachStep(step: WorkflowStep | WorkflowLoopChildStep): step is WorkflowForEachStep {
+  return 'for_each' in step;
+}
 
 export class WorkflowExecutionError extends Error {
   readonly filePath: string;
@@ -230,144 +262,21 @@ export async function runWorkflowFile({
   }
 
   let lastStepId: string | null = findLastCompletedStepId(steps, results);
-
   for (let idx = startIndex; idx < steps.length; idx++) {
     const step = steps[idx];
-    const execution = getStepExecution(step);
-    const stepType = getTraceStepType(step, execution);
-
-    if (!evaluateCondition(step.when ?? step.condition, results)) {
-      results[step.id] = { id: step.id, skipped: true };
-      trace.push({
-        stepId: step.id,
-        stepType,
-        status: 'skipped',
-        originalText: execution.kind === 'none' ? undefined : execution.value,
-      });
-      continue;
-    }
-
-    const env = mergeEnv(ctx.env, workflow.env, step.env, resolvedArgs, results);
-    const cwd = resolveCwd(step.cwd ?? workflow.cwd, resolvedArgs) ?? ctx.cwd;
-
-    let result: WorkflowStepResult;
-    if (execution.kind === 'shell') {
-      const command = resolveTemplate(execution.value, resolvedArgs, results);
-      const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
-      const stdinPreview = buildStdinPreview(stdinValue);
-      try {
-        const { stdout, stderr } = await runShellCommand({ command, stdin: stdinValue, env, cwd, signal: ctx.signal });
-        result = { id: step.id, stdout, stderr, json: parseJson(stdout) };
-        trace.push({
-          stepId: step.id,
-          stepType,
-          status: 'succeeded',
-          originalText: execution.value,
-          resolvedText: command,
-          stdinPreview,
-          stdout,
-          stderr,
-        });
-      } catch (error) {
-        const stdout = error instanceof WorkflowCommandError ? error.stdout : undefined;
-        const stderr = error instanceof WorkflowCommandError ? error.stderr : undefined;
-        const failedTrace = {
-          stepId: step.id,
-          stepType,
-          status: 'failed' as const,
-          originalText: execution.value,
-          resolvedText: command,
-          stdinPreview,
-          stdout,
-          stderr,
-        };
-        trace.push(failedTrace);
-        throw new WorkflowExecutionError({
-          message: error instanceof Error ? error.message : String(error),
-          filePath: resolvedFilePath,
-          stepId: step.id,
-          stepType,
-          originalText: execution.value,
-          resolvedText: command,
-          stdinPreview,
-          stdout,
-          stderr,
-          trace,
-        });
-      }
-    } else if (execution.kind === 'pipeline') {
-      if (!ctx.registry) {
-        throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
-      }
-      const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
-      const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
-      const stdinPreview = buildStdinPreview(inputValue);
-      try {
-        result = await runPipelineStep({
-          stepId: step.id,
-          pipelineText,
-          inputValue,
-          ctx,
-          env,
-          cwd,
-        });
-        trace.push({
-          stepId: step.id,
-          stepType,
-          status: 'succeeded',
-          originalText: execution.value,
-          resolvedText: pipelineText,
-          stdinPreview,
-          stdout: result.stdout,
-          stderr: result.stderr,
-        });
-      } catch (error) {
-        const stdout = error instanceof WorkflowCommandError ? error.stdout : undefined;
-        const stderr = error instanceof WorkflowCommandError
-          ? error.stderr
-          : error instanceof Error
-            ? error.message
-            : String(error);
-        trace.push({
-          stepId: step.id,
-          stepType,
-          status: 'failed',
-          originalText: execution.value,
-          resolvedText: pipelineText,
-          stdinPreview,
-          stdout,
-          stderr,
-        });
-        throw new WorkflowExecutionError({
-          message: error instanceof Error ? error.message : String(error),
-          filePath: resolvedFilePath,
-          stepId: step.id,
-          stepType,
-          originalText: execution.value,
-          resolvedText: pipelineText,
-          stdinPreview,
-          stdout,
-          stderr,
-          trace,
-        });
-      }
-    } else {
-      const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
-      result = createSyntheticStepResult(step.id, inputValue);
-      trace.push({
-        stepId: step.id,
-        stepType,
-        status: 'succeeded',
-        stdinPreview: buildStdinPreview(inputValue),
-        stdout: result.stdout,
-        stderr: result.stderr,
-      });
-    }
-
+    const result = await executeTopLevelStep(step, {
+      filePath: resolvedFilePath,
+      workflow,
+      args: resolvedArgs,
+      ctx,
+      topLevelResults: results,
+      scopes: { local: results },
+      trace,
+    });
     results[step.id] = result;
     lastStepId = step.id;
 
-    if (isApprovalStep(step.approval)) {
+    if (isExecutionStep(step) && isApprovalStep(step.approval)) {
       const approval = extractApprovalRequest(step, results[step.id]);
 
       if (ctx.mode === 'tool' || !isInteractive(ctx.stdin)) {
@@ -422,6 +331,256 @@ export async function runWorkflowFile({
   return { status: 'ok', output, trace };
 }
 
+function isExecutionStep(step: WorkflowStep | WorkflowLoopChildStep): step is WorkflowExecutionStep {
+  return !isForEachStep(step);
+}
+
+async function executeTopLevelStep(
+  step: WorkflowStep,
+  executionContext: StepExecutionContext,
+): Promise<WorkflowStepResult> {
+  if (isForEachStep(step)) {
+    return executeForEachStep(step, executionContext);
+  }
+  return executeExecutionStep(step, executionContext);
+}
+
+async function executeExecutionStep(
+  step: WorkflowExecutionStep | WorkflowLoopChildStep,
+  {
+    filePath,
+    workflow,
+    args,
+    ctx,
+    scopes,
+    trace,
+    implicitStdin,
+    loopContext,
+  }: StepExecutionContext,
+): Promise<WorkflowStepResult> {
+  const execution = getStepExecution(step);
+  const stepType = getTraceStepType(step, execution);
+  const traceStepId = buildTraceStepId(step.id, loopContext);
+
+  if (!evaluateCondition(step.when ?? step.condition, scopes)) {
+    const skipped = { id: step.id, skipped: true } satisfies WorkflowStepResult;
+    scopes.local[step.id] = skipped;
+    trace.push({
+      stepId: traceStepId,
+      stepType,
+      status: 'skipped',
+      originalText: execution.kind === 'none' ? undefined : execution.value,
+    });
+    return skipped;
+  }
+
+  const env = mergeEnv(ctx.env, workflow.env, step.env, args, scopes);
+  const cwd = resolveCwd(step.cwd ?? workflow.cwd, args) ?? ctx.cwd;
+  const resolvedStdin = resolveStepInput(step.stdin, {
+    args,
+    scopes,
+    implicitValue: implicitStdin,
+  });
+  const stdinPreview = buildStdinPreview(execution.kind === 'shell' ? encodeShellInput(resolvedStdin) : resolvedStdin);
+
+  try {
+    let result: WorkflowStepResult;
+    if (execution.kind === 'shell') {
+      const command = resolveTemplate(execution.value, args, scopes);
+      const shellStdin = encodeShellInput(resolvedStdin);
+      const { stdout, stderr } = await runShellCommand({ command, stdin: shellStdin, env, cwd, signal: ctx.signal });
+      result = { id: step.id, stdout, stderr, json: parseJson(stdout) };
+      trace.push({
+        stepId: traceStepId,
+        stepType,
+        status: 'succeeded',
+        originalText: execution.value,
+        resolvedText: command,
+        stdinPreview,
+        stdout,
+        stderr,
+      });
+    } else if (execution.kind === 'pipeline') {
+      if (!ctx.registry) {
+        throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
+      }
+      const pipelineText = resolveTemplate(execution.value, args, scopes);
+      result = await runPipelineStep({
+        stepId: traceStepId,
+        pipelineText,
+        inputValue: resolvedStdin,
+        ctx,
+        env,
+        cwd,
+      });
+      result.id = step.id;
+      trace.push({
+        stepId: traceStepId,
+        stepType,
+        status: 'succeeded',
+        originalText: execution.value,
+        resolvedText: pipelineText,
+        stdinPreview,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      });
+    } else {
+      result = createSyntheticStepResult(step.id, resolvedStdin);
+      trace.push({
+        stepId: traceStepId,
+        stepType,
+        status: 'succeeded',
+        stdinPreview,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      });
+    }
+
+    scopes.local[step.id] = result;
+    return result;
+  } catch (error) {
+    const stdout = error instanceof WorkflowCommandError ? error.stdout : undefined;
+    const stderr = error instanceof WorkflowCommandError
+      ? error.stderr
+      : error instanceof Error
+        ? error.message
+        : String(error);
+    const originalText = execution.kind === 'none' ? undefined : execution.value;
+    const resolvedText = originalText ? resolveTemplate(originalText, args, scopes) : undefined;
+    trace.push({
+      stepId: traceStepId,
+      stepType,
+      status: 'failed',
+      originalText,
+      resolvedText,
+      stdinPreview,
+      stdout,
+      stderr,
+    });
+    throw new WorkflowExecutionError({
+      message: error instanceof Error ? error.message : String(error),
+      filePath,
+      stepId: loopContext?.loopStepId ?? step.id,
+      stepType: loopContext ? 'loop' : stepType,
+      originalText,
+      resolvedText,
+      stdinPreview,
+      stdout,
+      stderr,
+      trace,
+    });
+  }
+}
+
+async function executeForEachStep(
+  step: WorkflowForEachStep,
+  {
+    filePath,
+    workflow,
+    args,
+    ctx,
+    topLevelResults,
+    scopes,
+    trace,
+  }: StepExecutionContext,
+): Promise<WorkflowStepResult> {
+  if (!evaluateCondition(step.when ?? step.condition, scopes)) {
+    const skipped = { id: step.id, skipped: true } satisfies WorkflowStepResult;
+    scopes.local[step.id] = skipped;
+    trace.push({
+      stepId: step.id,
+      stepType: 'loop',
+      status: 'skipped',
+      originalText: step.for_each,
+    });
+    return skipped;
+  }
+
+  const sourceValue = resolveLoopSource(step.for_each, args, scopes);
+  if (!Array.isArray(sourceValue)) {
+    const description = describeValueForError(sourceValue);
+    const message = `Workflow step ${step.id} for_each source must resolve to a JSON array, got ${description}`;
+    trace.push({
+      stepId: step.id,
+      stepType: 'loop',
+      status: 'failed',
+      originalText: step.for_each,
+      stderr: message,
+    });
+    throw new WorkflowExecutionError({
+      message,
+      filePath,
+      stepId: step.id,
+      stepType: 'loop',
+      originalText: step.for_each,
+      stderr: message,
+      trace,
+    });
+  }
+
+  const aggregate: unknown[] = [];
+  for (let idx = 0; idx < sourceValue.length; idx++) {
+    const item = sourceValue[idx];
+    const childResults: ResultScope = {};
+    for (let childIndex = 0; childIndex < step.steps.length; childIndex++) {
+      const child = step.steps[childIndex];
+      try {
+        await executeExecutionStep(child, {
+          filePath,
+          workflow,
+          args,
+          ctx,
+          topLevelResults,
+          scopes: {
+            local: childResults,
+            outer: topLevelResults,
+          },
+          trace,
+          implicitStdin: childIndex === 0 ? item : undefined,
+          loopContext: {
+            loopStepId: step.id,
+            iterationIndex: idx,
+          },
+        });
+      } catch (error) {
+        if (error instanceof WorkflowExecutionError) {
+          const message = `Workflow step ${step.id} failed in iteration ${idx + 1} at child step ${child.id}: ${error.message}`;
+          throw new WorkflowExecutionError({
+            message,
+            filePath,
+            stepId: step.id,
+            stepType: 'loop',
+            originalText: step.for_each,
+            stderr: message,
+            trace,
+          });
+        }
+        throw error;
+      }
+    }
+    const lastChild = childResults[step.steps[step.steps.length - 1].id];
+    aggregate.push(extractAggregateValue(lastChild));
+  }
+
+  const result = {
+    id: step.id,
+    stdout: JSON.stringify(aggregate),
+    stderr: '',
+    json: aggregate,
+  } satisfies WorkflowStepResult;
+  trace.push({
+    stepId: step.id,
+    stepType: 'loop',
+    status: 'succeeded',
+    originalText: step.for_each,
+    resolvedText: JSON.stringify(sourceValue),
+    stdout: result.stdout,
+    stderr: result.stderr,
+  });
+  scopes.local[step.id] = result;
+  return result;
+}
+
 export function decodeWorkflowResumePayload(payload: unknown): WorkflowResumePayload | null {
   if (!payload || typeof payload !== 'object') return null;
   const data = payload as Partial<WorkflowResumePayload>;
@@ -459,9 +618,9 @@ async function loadWorkflowResumeState(env: Record<string, string | undefined>, 
 function mergeEnv(
   base: Record<string, string | undefined>,
   workflowEnv: WorkflowFile['env'],
-  stepEnv: WorkflowStep['env'],
+  stepEnv: WorkflowExecutionStep['env'],
   args: Record<string, unknown>,
-  results: Record<string, WorkflowStepResult>,
+  scopes: ExecutionScopes,
 ) {
   const env = { ...base } as Record<string, string | undefined>;
 
@@ -479,7 +638,7 @@ function mergeEnv(
     if (!source) return;
     for (const [key, value] of Object.entries(source)) {
       if (typeof value === 'string') {
-        env[key] = resolveTemplate(value, args, results);
+        env[key] = resolveTemplate(value, args, scopes);
       }
     }
   };
@@ -504,36 +663,37 @@ function resolveCwd(cwd: string | undefined, args: Record<string, unknown>) {
   return resolveArgsTemplate(cwd, args);
 }
 
-function resolveInputValue(
+function resolveStepInput(
   stdin: unknown,
-  args: Record<string, unknown>,
-  results: Record<string, WorkflowStepResult>,
+  {
+    args,
+    scopes,
+    implicitValue,
+  }: {
+    args: Record<string, unknown>;
+    scopes: ExecutionScopes;
+    implicitValue?: unknown;
+  },
 ) {
-  if (stdin === null || stdin === undefined) return null;
+  if (stdin === undefined) {
+    return implicitValue ?? null;
+  }
+  if (stdin === null) return null;
   if (typeof stdin === 'string') {
     const ref = parseStepRef(stdin.trim());
-    if (ref) return getStepRefValue(ref, results, true);
-    return resolveTemplate(stdin, args, results);
+    if (ref) return getStepRefValue(ref, scopes, true);
+    return resolveTemplate(stdin, args, scopes);
   }
   return stdin;
-}
-
-function resolveShellStdin(
-  stdin: unknown,
-  args: Record<string, unknown>,
-  results: Record<string, WorkflowStepResult>,
-) {
-  const value = resolveInputValue(stdin, args, results);
-  return encodeShellInput(value);
 }
 
 function resolveTemplate(
   input: string,
   args: Record<string, unknown>,
-  results: Record<string, WorkflowStepResult>,
+  scopes: ExecutionScopes,
 ) {
   const withArgs = resolveArgsTemplate(input, args);
-  return resolveStepRefs(withArgs, results);
+  return resolveStepRefs(withArgs, scopes);
 }
 
 function resolveArgsTemplate(input: string, args: Record<string, unknown>) {
@@ -543,9 +703,19 @@ function resolveArgsTemplate(input: string, args: Record<string, unknown>) {
   });
 }
 
-function resolveStepRefs(input: string, results: Record<string, WorkflowStepResult>) {
+function findStepResult(id: string, scopes: ExecutionScopes) {
+  if (id in scopes.local) {
+    return scopes.local[id];
+  }
+  if (scopes.outer && id in scopes.outer) {
+    return scopes.outer[id];
+  }
+  return undefined;
+}
+
+function resolveStepRefs(input: string, scopes: ExecutionScopes) {
   return input.replace(/\$([A-Za-z0-9_-]+)\.(stdout|json|approved)/g, (match, id, field) => {
-    const step = results[id];
+    const step = findStepResult(id, scopes);
     if (!step) return match;
     if (field === 'stdout') return step.stdout ?? '';
     if (field === 'json') return step.json !== undefined ? JSON.stringify(step.json) : '';
@@ -562,10 +732,10 @@ function parseStepRef(value: string) {
 
 function getStepRefValue(
   ref: { id: string; field: 'stdout' | 'json' },
-  results: Record<string, WorkflowStepResult>,
+  scopes: ExecutionScopes,
   strict: boolean,
 ) {
-  const step = results[ref.id];
+  const step = findStepResult(ref.id, scopes);
   if (!step) {
     if (strict) throw new Error(`Unknown step reference: ${ref.id}.${ref.field}`);
     return '';
@@ -576,7 +746,7 @@ function getStepRefValue(
 
 function evaluateCondition(
   condition: unknown,
-  results: Record<string, WorkflowStepResult>,
+  scopes: ExecutionScopes,
 ) {
   if (condition === undefined || condition === null) return true;
   if (typeof condition === 'boolean') return condition;
@@ -589,10 +759,47 @@ function evaluateCondition(
   const match = trimmed.match(/^\$([A-Za-z0-9_-]+)\.(approved|skipped)$/);
   if (!match) throw new Error(`Unsupported condition: ${condition}`);
 
-  const step = results[match[1]];
+  const step = findStepResult(match[1], scopes);
   if (!step) return false;
 
   return match[2] === 'approved' ? step.approved === true : step.skipped === true;
+}
+
+function resolveLoopSource(
+  source: string,
+  args: Record<string, unknown>,
+  scopes: ExecutionScopes,
+) {
+  const ref = parseStepRef(source.trim());
+  const value = ref
+    ? getStepRefValue(ref, scopes, true)
+    : resolveTemplate(source, args, scopes);
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    return parseJson(value);
+  }
+  return value;
+}
+
+function extractAggregateValue(result: WorkflowStepResult | undefined) {
+  if (!result) return null;
+  if (result.json !== undefined) return result.json;
+  if (result.stdout !== undefined) return result.stdout;
+  if (result.approved !== undefined) return result.approved;
+  if (result.skipped) return null;
+  return null;
+}
+
+function describeValueForError(value: unknown) {
+  if (Array.isArray(value)) return 'array';
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  return typeof value;
+}
+
+function buildTraceStepId(stepId: string, loopContext?: { loopStepId: string; iterationIndex: number }) {
+  if (!loopContext) return stepId;
+  return `${loopContext.loopStepId}[${loopContext.iterationIndex + 1}].${stepId}`;
 }
 
 function isApprovalStep(approval: WorkflowStep['approval']) {
@@ -743,7 +950,7 @@ async function runShellCommand({
 }
 
 function getTraceStepType(
-  step: WorkflowStep,
+  step: WorkflowExecutionStep | WorkflowLoopChildStep,
   execution: ReturnType<typeof getStepExecution>,
 ): WorkflowStepTrace['stepType'] {
   if (execution.kind === 'pipeline') return 'pipeline';
@@ -751,7 +958,7 @@ function getTraceStepType(
   return 'approval-only';
 }
 
-function getStepExecution(step: WorkflowStep) {
+function getStepExecution(step: WorkflowExecutionStep | WorkflowLoopChildStep) {
   if (typeof step.pipeline === 'string' && step.pipeline.trim()) {
     return { kind: 'pipeline' as const, value: step.pipeline };
   }

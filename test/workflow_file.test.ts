@@ -305,6 +305,141 @@ test('workflow pipeline steps respect cwd and feed later shell steps via stdout 
   assert.deepEqual(result.output, [{ pwd: resolvedTargetDir }]);
 });
 
+test('workflow for-each loops execute per item and expose aggregate results to later steps', async () => {
+  const workflow = {
+    steps: [
+      {
+        id: 'collect',
+        command: "node -e \"process.stdout.write(JSON.stringify([{title:'a'},{title:'b'}]))\"",
+      },
+      {
+        id: 'summaries',
+        for_each: '$collect.stdout',
+        steps: [
+          {
+            id: 'summarize_one',
+            command: "node -e \"let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{const item=JSON.parse(d);process.stdout.write(JSON.stringify({summary:item.title.toUpperCase()}));});\"",
+          },
+          {
+            id: 'normalize_one',
+            command: "node -e \"let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{process.stdout.write(d);});\"",
+            stdin: '$summarize_one.stdout',
+          },
+        ],
+      },
+      {
+        id: 'finish',
+        command: "node -e \"let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{const items=JSON.parse(d);process.stdout.write(JSON.stringify({count:items.length,first:items[0].summary,last:items[1].summary}));});\"",
+        stdin: '$summaries.stdout',
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-loop-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const result = await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env: process.env,
+      mode: 'tool',
+    },
+  });
+
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, [{ count: 2, first: 'A', last: 'B' }]);
+  assert.equal(result.trace?.some((entry) => entry.stepType === 'loop' && entry.stepId === 'summaries'), true);
+  assert.equal(result.trace?.some((entry) => entry.stepId === 'summaries[1].summarize_one'), true);
+});
+
+test('workflow for-each first child explicit stdin overrides implicit loop item input', async () => {
+  const workflow = {
+    steps: [
+      {
+        id: 'collect',
+        command: "node -e \"process.stdout.write(JSON.stringify([{value:1},{value:2}]))\"",
+      },
+      {
+        id: 'config',
+        command: "node -e \"process.stdout.write(JSON.stringify({value:99}))\"",
+      },
+      {
+        id: 'override_loop',
+        for_each: '$collect.stdout',
+        steps: [
+          {
+            id: 'echo_override',
+            command: "node -e \"let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(d));\"",
+            stdin: '$config.stdout',
+          },
+        ],
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-loop-override-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const result = await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env: process.env,
+      mode: 'tool',
+    },
+  });
+
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, [{ value: 99 }, { value: 99 }]);
+});
+
+test('workflow for-each requires a JSON-array stdout source', async () => {
+  const workflow = {
+    steps: [
+      {
+        id: 'collect',
+        command: "node -e \"process.stdout.write(JSON.stringify({value:1}))\"",
+      },
+      {
+        id: 'loop',
+        for_each: '$collect.stdout',
+        steps: [
+          {
+            id: 'echo_one',
+            command: "node -e \"process.stdout.write('ok')\"",
+          },
+        ],
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-loop-invalid-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  await assert.rejects(
+    () =>
+      runWorkflowFile({
+        filePath,
+        ctx: {
+          stdin: process.stdin,
+          stdout: process.stdout,
+          stderr: process.stderr,
+          env: process.env,
+          mode: 'tool',
+        },
+      }),
+    /must resolve to a JSON array/i,
+  );
+});
+
 async function closeServer(server: http.Server) {
   if (!server.listening) return;
   await new Promise<void>((resolve) => server.close(() => resolve()));

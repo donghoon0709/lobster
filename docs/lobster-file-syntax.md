@@ -61,6 +61,8 @@ Every step must be an object with a unique string `id`.
 | `run` | string | Shell command to run |
 | `command` | string | Shell command alias for `run` |
 | `pipeline` | string | Lobster pipeline string |
+| `for_each` | string | Loop over a previous step's JSON-array stdout |
+| `steps` | array | Nested child steps for a `for_each` loop |
 | `env` | object | Step-specific environment variables |
 | `cwd` | string | Step-specific working directory |
 | `stdin` | any | Input for the step |
@@ -76,6 +78,165 @@ A step may define **exactly one** of:
 - `pipeline`
 
 The one exception is an **approval-only** step, which may omit all three if `approval` is present.
+
+## `for_each` loop steps
+
+Use `for_each:` when one top-level step should iterate over the **JSON-array stdout** of an earlier step.
+
+```yaml
+steps:
+  - id: fetch_top_posts
+    command: node -e "process.stdout.write(JSON.stringify([{title:'A'},{title:'B'}]))"
+
+  - id: summarize_posts
+    for_each: $fetch_top_posts.stdout
+    steps:
+      - id: summarize_one
+        pipeline: llm.invoke --prompt "Summarize this item and return JSON."
+      - id: normalize_one
+        command: node -e "process.stdout.write(process.stdin.read() || '')"
+        stdin: $summarize_one.stdout
+```
+
+Loop semantics:
+
+- `for_each` must reference a **previous step's** stdout using the form `$step.stdout`
+- that stdout must be parseable as a **JSON array**
+- the loop body runs **sequentially once per array item**
+- the **first child step** receives the current loop item on stdin automatically
+- if that first child step also defines `stdin`, the explicit `stdin` value wins
+- the top-level loop step aggregates per-iteration results into an array
+- later top-level steps can consume `$loop_step.stdout` or `$loop_step.json`
+
+### How a loop body reads the current item
+
+The shipped loop feature does **not** introduce a named loop variable and does **not** inject a special environment variable such as `LOBSTER_ITEM_JSON`.
+
+Instead, the current item is exposed through the existing Lobster input model:
+
+- the **first child step** in the loop body receives the current array item on `stdin`
+- later child steps can read earlier child results with normal refs such as `$summarize_one.stdout`
+- later top-level steps can read the aggregate loop result with normal refs such as `$summaries.stdout`
+
+If you are writing a **shell child step**, remember that Lobster writes structured stdin as JSON text. In practice that means your shell process should read stdin and parse JSON itself.
+
+### Python guidance for loop body shell steps
+
+If a Python shell step needs to consume the current loop item from stdin:
+
+- **prefer** `python3 -c "..."` (or a checked-in `.py` script file)
+- **avoid** heredoc forms such as `python3 - <<'PY'`
+
+Why:
+
+- Lobster delivers the current loop item through **stdin**
+- `python3 - <<'PY'` uses stdin for the Python source itself
+- that means the loop item does **not** reach `sys.stdin.read()` the way you expect
+
+Recommended pattern:
+
+```yaml
+steps:
+  - id: fetch_hn_items
+    for_each: $collect_top10_story_ids.stdout
+    steps:
+      - id: fetch_one_item
+        run: >
+          python3 -c "import json, sys, urllib.request;
+          raw = sys.stdin.read().strip();
+          story_id = json.loads(raw) if raw.startswith('\"') else int(raw);
+          with urllib.request.urlopen(f'https://hacker-news.firebaseio.com/v0/item/{story_id}.json') as resp:
+              item = json.load(resp);
+          print(json.dumps(item, ensure_ascii=False))"
+```
+
+If the Python logic is too long for `python3 -c`, prefer:
+
+```yaml
+run: python3 scripts/fetch_hn_item.py
+```
+
+where `scripts/fetch_hn_item.py` reads from `sys.stdin`.
+
+Example:
+
+```yaml
+steps:
+  - id: collect
+    command: node -e "process.stdout.write(JSON.stringify([{title:'A'},{title:'B'}]))"
+
+  - id: summarize
+    for_each: $collect.stdout
+    steps:
+      - id: summarize_one
+        command: >
+          node -e "let d='';process.stdin.on('data',c=>d+=c);
+          process.stdin.on('end',()=>{const item=JSON.parse(d);
+          process.stdout.write(JSON.stringify({summary:item.title.toUpperCase()}));});"
+      - id: normalize_one
+        command: node -e "process.stdout.write(process.stdin.read() || '')"
+        stdin: $summarize_one.stdout
+```
+
+In that example:
+
+1. `collect` emits a JSON array on stdout
+2. `summarize` iterates once per array item
+3. `summarize_one` receives the current item on stdin automatically
+4. `normalize_one` reads the previous child step through `$summarize_one.stdout`
+
+### Explicit stdin override on the first child step
+
+If the first child step also defines `stdin`, that explicit value replaces the implicit current-item input.
+
+Example:
+
+```yaml
+steps:
+  - id: collect
+    command: node -e "process.stdout.write(JSON.stringify([{value:1},{value:2}]))"
+
+  - id: config
+    command: node -e "process.stdout.write(JSON.stringify({value:99}))"
+
+  - id: override_loop
+    for_each: $collect.stdout
+    steps:
+      - id: echo_override
+        command: node -e "process.stdout.write(process.stdin.read() || '')"
+        stdin: $config.stdout
+```
+
+In this case, `echo_override` sees the JSON from `config`, **not** the current loop item.
+
+### What is and is not visible inside a loop
+
+- Child steps can reference:
+  - earlier child steps from the **same iteration**
+  - completed outer top-level steps such as `$collect.stdout`
+- Child steps cannot reference:
+  - child-step results from another iteration
+  - a synthetic current-item variable name
+- Later top-level steps cannot reference:
+  - loop child ids directly
+  - anything like `$summarize_one.stdout` outside the loop body
+
+Use the top-level loop step id for downstream consumption:
+
+```yaml
+- id: finalize
+  command: node -e "process.stdout.write(process.stdin.read() || '')"
+  stdin: $summarize.stdout
+```
+
+Current non-goals / restrictions:
+
+- no nested loops
+- no `break` / `continue`
+- no parallel loop execution
+- no named loop variables
+- no `repeat N times`
+- no approval steps inside loop bodies
 
 ## `run` vs `command`
 
@@ -365,6 +526,11 @@ A workflow file is invalid if:
 - a step defines more than one of `run`, `command`, or `pipeline`
 - a non-approval step defines none of `run`, `command`, or `pipeline`
 - `run`, `command`, or `pipeline` is present but not a string
+- a `for_each` step does not use the form `$previous_step.stdout`
+- a `for_each` step has an empty `steps` body
+- a `for_each` step also defines `run`, `command`, `pipeline`, `approval`, `env`, `cwd`, or `stdin`
+- loop child steps reuse the same `id` inside one body
+- a loop body contains another loop or an approval step
 
 ## Source of truth
 

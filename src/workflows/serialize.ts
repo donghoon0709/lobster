@@ -1,6 +1,8 @@
 import type {
   SupportedConditionalField,
   WorkflowFile,
+  WorkflowForEachStep,
+  WorkflowLoopChildStep,
   WorkflowStep,
 } from './types.js';
 
@@ -42,6 +44,10 @@ function renderKey(key: string) {
   return /^[A-Za-z_][A-Za-z0-9_-]*$/u.test(key) ? key : JSON.stringify(key);
 }
 
+function isForEachStep(step: WorkflowStep): step is WorkflowForEachStep {
+  return 'for_each' in step;
+}
+
 function isPlainScalarString(value: string) {
   return /^[A-Za-z0-9_./${}-]+$/u.test(value)
     && !/^(true|false|null|~|-?\d+(\.\d+)?)$/u.test(value);
@@ -74,17 +80,38 @@ function pushNestedRecord(
   }
 }
 
-function pushStepLines(lines: string[], step: WorkflowStep) {
-  lines.push(`  - id: ${renderInlineValue(step.id)}`);
-  if (step.run !== undefined) lines.push(`    run: ${renderInlineValue(step.run)}`);
-  if (step.command !== undefined) lines.push(`    command: ${renderInlineValue(step.command)}`);
-  if (step.pipeline !== undefined) lines.push(`    pipeline: ${renderInlineValue(step.pipeline)}`);
-  pushNestedRecord(lines, 2, 'env', step.env);
-  if (step.cwd !== undefined) lines.push(`    cwd: ${renderInlineValue(step.cwd)}`);
-  if (step.stdin !== undefined) lines.push(`    stdin: ${renderInlineValue(step.stdin)}`);
-  if (step.approval !== undefined) lines.push(`    approval: ${renderInlineValue(step.approval)}`);
-  if (step.when !== undefined) lines.push(`    when: ${renderInlineValue(step.when)}`);
-  if (step.condition !== undefined) lines.push(`    condition: ${renderInlineValue(step.condition)}`);
+function pushConditionalLines(lines: string[], depth: number, step: { when?: unknown; condition?: unknown }) {
+  if (step.when !== undefined) lines.push(`${renderIndent(depth)}when: ${renderInlineValue(step.when)}`);
+  if (step.condition !== undefined) lines.push(`${renderIndent(depth)}condition: ${renderInlineValue(step.condition)}`);
+}
+
+function pushExecutionStepLines(lines: string[], step: WorkflowLoopChildStep, depth: number) {
+  lines.push(`${renderIndent(depth)}- id: ${renderInlineValue(step.id)}`);
+  if (step.run !== undefined) lines.push(`${renderIndent(depth + 1)}run: ${renderInlineValue(step.run)}`);
+  if (step.command !== undefined) lines.push(`${renderIndent(depth + 1)}command: ${renderInlineValue(step.command)}`);
+  if (step.pipeline !== undefined) lines.push(`${renderIndent(depth + 1)}pipeline: ${renderInlineValue(step.pipeline)}`);
+  pushNestedRecord(lines, depth + 1, 'env', step.env);
+  if (step.cwd !== undefined) lines.push(`${renderIndent(depth + 1)}cwd: ${renderInlineValue(step.cwd)}`);
+  if (step.stdin !== undefined) lines.push(`${renderIndent(depth + 1)}stdin: ${renderInlineValue(step.stdin)}`);
+  if (step.approval !== undefined) {
+    lines.push(`${renderIndent(depth + 1)}approval: ${renderInlineValue(step.approval)}`);
+  }
+  pushConditionalLines(lines, depth + 1, step);
+}
+
+function pushStepLines(lines: string[], step: WorkflowStep, depth = 1) {
+  if (isForEachStep(step)) {
+    lines.push(`${renderIndent(depth)}- id: ${renderInlineValue(step.id)}`);
+    lines.push(`${renderIndent(depth + 1)}for_each: ${renderInlineValue(step.for_each)}`);
+    pushConditionalLines(lines, depth + 1, step);
+    lines.push(`${renderIndent(depth + 1)}steps:`);
+    for (const child of step.steps) {
+      pushExecutionStepLines(lines, child, depth + 2);
+    }
+    return;
+  }
+
+  pushExecutionStepLines(lines, step, depth);
 }
 
 export function validateSupportedWorkflowFile(workflow: WorkflowFile) {
@@ -101,36 +128,114 @@ export function validateSupportedWorkflowFile(workflow: WorkflowFile) {
     if (!step || typeof step !== 'object' || Array.isArray(step)) {
       throw new Error('Workflow step must be an object');
     }
-    if (!step.id || typeof step.id !== 'string') {
-      throw new Error('Workflow step requires an id');
-    }
-    if (seen.has(step.id)) {
-      throw new Error(`Duplicate workflow step id: ${step.id}`);
-    }
-    seen.add(step.id);
-
-    const count = executionCount(step);
-    if (count === 0 && !isApprovalStep(step.approval)) {
-      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, or approval`);
-    }
-    if (count > 1) {
-      throw new Error(`Workflow step ${step.id} can only define one of run, command, or pipeline`);
-    }
-    if (step.run !== undefined && typeof step.run !== 'string') {
-      throw new Error(`Workflow step ${step.id} run must be a string`);
-    }
-    if (step.command !== undefined && typeof step.command !== 'string') {
-      throw new Error(`Workflow step ${step.id} command must be a string`);
-    }
-    if (step.pipeline !== undefined && typeof step.pipeline !== 'string') {
-      throw new Error(`Workflow step ${step.id} pipeline must be a string`);
-    }
-    if (step.when !== undefined && step.condition !== undefined) {
-      throw new Error(`Workflow step ${step.id} cannot define both when and condition`);
-    }
+    validateStep(step, {
+      parentId: null,
+      seen,
+      allowLoop: true,
+      allowApproval: true,
+    });
   }
 
   return workflow;
+}
+
+function validateStep(
+  step: WorkflowStep | WorkflowLoopChildStep,
+  {
+    parentId,
+    seen,
+    allowLoop,
+    allowApproval,
+  }: {
+    parentId: string | null;
+    seen: Set<string>;
+    allowLoop: boolean;
+    allowApproval: boolean;
+  },
+) {
+  if (!step.id || typeof step.id !== 'string') {
+    throw new Error(parentId ? `Workflow step in ${parentId} requires an id` : 'Workflow step requires an id');
+  }
+  if (seen.has(step.id)) {
+    throw new Error(parentId ? `Duplicate workflow step id in ${parentId}: ${step.id}` : `Duplicate workflow step id: ${step.id}`);
+  }
+  seen.add(step.id);
+
+  if (step.when !== undefined && step.condition !== undefined) {
+    throw new Error(`Workflow step ${step.id} cannot define both when and condition`);
+  }
+
+  if ('for_each' in step || 'steps' in step) {
+    validateForEachStep(step as WorkflowForEachStep, { allowLoop });
+    return;
+  }
+
+  validateExecutionStep(step, { allowApproval });
+}
+
+function validateExecutionStep(
+  step: WorkflowLoopChildStep,
+  { allowApproval }: { allowApproval: boolean },
+) {
+  const count = executionCount(step);
+  const approval = 'approval' in step ? step.approval : undefined;
+
+  if (!allowApproval && approval !== undefined) {
+    throw new Error(`Workflow loop child step ${step.id} cannot define approval`);
+  }
+  if (count === 0 && !isApprovalStep(approval)) {
+    throw new Error(`Workflow step ${step.id} requires run, command, pipeline, or approval`);
+  }
+  if (count > 1) {
+    throw new Error(`Workflow step ${step.id} can only define one of run, command, or pipeline`);
+  }
+  if (step.run !== undefined && typeof step.run !== 'string') {
+    throw new Error(`Workflow step ${step.id} run must be a string`);
+  }
+  if (step.command !== undefined && typeof step.command !== 'string') {
+    throw new Error(`Workflow step ${step.id} command must be a string`);
+  }
+  if (step.pipeline !== undefined && typeof step.pipeline !== 'string') {
+    throw new Error(`Workflow step ${step.id} pipeline must be a string`);
+  }
+}
+
+function validateForEachStep(
+  step: WorkflowForEachStep,
+  {
+    allowLoop,
+  }: {
+    allowLoop: boolean;
+  },
+) {
+  if (!allowLoop) {
+    throw new Error(`Workflow loop child step ${step.id} cannot define nested for_each`);
+  }
+  if (typeof step.for_each !== 'string' || step.for_each.trim().length === 0) {
+    throw new Error(`Workflow step ${step.id} for_each must be a non-empty string`);
+  }
+  if (!/^\$[A-Za-z0-9_-]+\.stdout$/u.test(step.for_each.trim())) {
+    throw new Error(`Workflow step ${step.id} for_each must reference a previous step stdout like $step.stdout`);
+  }
+  if (!Array.isArray(step.steps) || step.steps.length === 0) {
+    throw new Error(`Workflow step ${step.id} requires a non-empty steps array`);
+  }
+  if ('run' in step || 'command' in step || 'pipeline' in step || 'approval' in step || 'env' in step || 'cwd' in step || 'stdin' in step) {
+    throw new Error(`Workflow step ${step.id} for_each steps cannot define run, command, pipeline, approval, env, cwd, or stdin`);
+  }
+
+  const childSeen = new Set<string>();
+  for (const child of step.steps) {
+    if (!child || typeof child !== 'object' || Array.isArray(child)) {
+      throw new Error(`Workflow step ${step.id} child step must be an object`);
+    }
+    validateStep(child, {
+      parentId: step.id,
+      seen: childSeen,
+      allowLoop: false,
+      allowApproval: false,
+    });
+  }
 }
 
 export function setConditionalField(
