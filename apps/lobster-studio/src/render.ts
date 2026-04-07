@@ -1,5 +1,5 @@
 import type { SupportedExecutionMode } from '../../../src/workflows/types.js';
-import type { EditorState, EditorTask } from './editor-state.js';
+import type { EditorState, EditorTask, EditorTaskKind } from './editor-state.js';
 import { exportEditorState } from './export.js';
 
 type Actions = {
@@ -14,11 +14,18 @@ type Actions = {
   onUpdateEnv: (id: string, field: 'key' | 'value', value: string) => void;
   onRemoveEnv: (id: string) => void;
   onAddTask: () => void;
+  onAddChildTask: (index: number) => void;
   onRemoveTask: (index: number) => void;
+  onRemoveChildTask: (index: number, childIndex: number) => void;
   onMoveTask: (index: number, direction: -1 | 1) => void;
+  onMoveChildTask: (index: number, childIndex: number, direction: -1 | 1) => void;
   onTaskFieldChange: (index: number, field: keyof EditorTask, value: string) => void;
+  onChildTaskFieldChange: (index: number, childIndex: number, field: keyof EditorTask, value: string) => void;
+  onTaskKindChange: (index: number, value: EditorTaskKind) => void;
   onExecutionModeChange: (index: number, value: SupportedExecutionMode) => void;
+  onChildExecutionModeChange: (index: number, childIndex: number, value: SupportedExecutionMode) => void;
   onConditionFieldChange: (index: number, value: 'when' | 'condition') => void;
+  onChildConditionFieldChange: (index: number, childIndex: number, value: 'when' | 'condition') => void;
   onCopyExport: (text: string) => void;
 };
 
@@ -31,8 +38,8 @@ function escapeHtml(value: string) {
     .replaceAll("'", '&#39;');
 }
 
-function selected(mode: SupportedExecutionMode, current: SupportedExecutionMode) {
-  return mode === current ? 'selected' : '';
+function selected<T extends string>(value: T, current: T) {
+  return value === current ? 'selected' : '';
 }
 
 function renderExecutionField(
@@ -42,17 +49,119 @@ function renderExecutionField(
   label: string,
   value: string,
   elementId: string,
+  disabled: boolean,
 ) {
   const active = current === mode ? 'active' : '';
   return `
     <div class="field-group field-group--full execution-field ${active}">
       <label for="${elementId}">${label}</label>
-      <textarea id="${elementId}" data-task-field="${field}" ${current === 'approval-only' ? 'disabled' : ''}>${escapeHtml(value)}</textarea>
+      <textarea id="${elementId}" data-task-field="${field}" ${disabled ? 'disabled' : ''}>${escapeHtml(value)}</textarea>
     </div>
   `;
 }
 
-function renderTask(task: EditorTask, index: number, total: number) {
+function renderLeafTask(task: EditorTask, prefix: string, disableApprovalOnly = false) {
+  return `
+    <div class="task-grid">
+      <div class="field-group">
+        <label for="${prefix}-id">Task id</label>
+        <input id="${prefix}-id" data-task-field="id" value="${escapeHtml(task.id)}" />
+      </div>
+      <div class="field-group">
+        <label for="${prefix}-mode">Execution mode</label>
+        <select id="${prefix}-mode" data-task-mode>
+          <option value="command" ${selected(task.executionMode, 'command')}>command</option>
+          <option value="run" ${selected(task.executionMode, 'run')}>run</option>
+          <option value="pipeline" ${selected(task.executionMode, 'pipeline')}>pipeline</option>
+          <option value="approval-only" ${selected(task.executionMode, 'approval-only')} ${disableApprovalOnly ? 'disabled' : ''}>approval-only</option>
+        </select>
+      </div>
+
+      ${renderExecutionField('command', task.executionMode, 'command', 'command', task.command, `${prefix}-command`, task.executionMode === 'approval-only')}
+      ${renderExecutionField('run', task.executionMode, 'run', 'run', task.run, `${prefix}-run`, task.executionMode === 'approval-only')}
+      ${renderExecutionField('pipeline', task.executionMode, 'pipeline', 'pipeline', task.pipeline, `${prefix}-pipeline`, task.executionMode === 'approval-only')}
+
+      <div class="field-group">
+        <label for="${prefix}-approval">Approval prompt</label>
+        <input id="${prefix}-approval" data-task-field="approvalPrompt" value="${escapeHtml(task.approvalPrompt)}" placeholder="${disableApprovalOnly ? 'Not supported inside loop bodies' : 'Optional unless approval-only'}" ${disableApprovalOnly ? 'disabled' : ''} />
+      </div>
+      <div class="field-group">
+        <label for="${prefix}-stdin">stdin reference</label>
+        <input id="${prefix}-stdin" data-task-field="stdin" value="${escapeHtml(task.stdin)}" placeholder="$task_1.stdout" />
+      </div>
+      <div class="field-group">
+        <label for="${prefix}-condition-field">Conditional field</label>
+        <select id="${prefix}-condition-field" data-condition-field>
+          <option value="when" ${task.conditionField === 'when' ? 'selected' : ''}>when</option>
+          <option value="condition" ${task.conditionField === 'condition' ? 'selected' : ''}>condition</option>
+        </select>
+      </div>
+      <div class="field-group">
+        <label for="${prefix}-condition-text">Condition value</label>
+        <input id="${prefix}-condition-text" data-task-field="conditionText" value="${escapeHtml(task.conditionText)}" placeholder="$approve.approved" />
+      </div>
+    </div>
+  `;
+}
+
+function renderChildTask(task: EditorTask, parentIndex: number, childIndex: number, total: number) {
+  const prefix = `child-${parentIndex}-${childIndex}`;
+  return `
+    <article class="task-card task-card--child" data-parent-task-index="${parentIndex}" data-child-task-index="${childIndex}">
+      <div class="task-card__header">
+        <div class="task-card__title">
+          <span class="task-card__badge">${parentIndex + 1}.${childIndex + 1}</span>
+          <strong>${escapeHtml(task.id || `task_${childIndex + 1}`)}</strong>
+        </div>
+        <div class="task-card__actions">
+          <button type="button" data-move-child-task="-1" ${childIndex === 0 ? 'disabled' : ''}>Move up</button>
+          <button type="button" data-move-child-task="1" ${childIndex === total - 1 ? 'disabled' : ''}>Move down</button>
+          <button type="button" data-remove-child-task ${total === 1 ? 'disabled' : ''}>Delete</button>
+        </div>
+      </div>
+      ${renderLeafTask(task, prefix, true)}
+    </article>
+  `;
+}
+
+function renderTopLevelTask(task: EditorTask, index: number, total: number) {
+  const prefix = `task-${index}`;
+  const body = task.kind === 'for-each'
+    ? `
+      <div class="task-grid">
+        <div class="field-group">
+          <label for="${prefix}-id">Loop id</label>
+          <input id="${prefix}-id" data-task-field="id" value="${escapeHtml(task.id)}" />
+        </div>
+        <div class="field-group field-group--full">
+          <label for="${prefix}-for-each">for_each source</label>
+          <input id="${prefix}-for-each" data-task-field="forEach" value="${escapeHtml(task.forEach)}" placeholder="$fetch.stdout" />
+        </div>
+        <div class="field-group">
+          <label for="${prefix}-condition-field">Conditional field</label>
+          <select id="${prefix}-condition-field" data-condition-field>
+            <option value="when" ${task.conditionField === 'when' ? 'selected' : ''}>when</option>
+            <option value="condition" ${task.conditionField === 'condition' ? 'selected' : ''}>condition</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label for="${prefix}-condition-text">Condition value</label>
+          <input id="${prefix}-condition-text" data-task-field="conditionText" value="${escapeHtml(task.conditionText)}" placeholder="$approve.approved" />
+        </div>
+      </div>
+      <div class="nested-stack">
+        <div class="stack-header">
+          <h3>Loop body tasks</h3>
+          <button type="button" data-add-child-task>Add child task</button>
+        </div>
+        <div class="field-help">
+          The first child task receives the current loop item on stdin automatically unless you set an explicit stdin value.
+        </div>
+        ${task.childTasks.map((child, childIndex) => renderChildTask(child, index, childIndex, task.childTasks.length)).join('')}
+      </div>
+    `
+    : renderLeafTask(task, prefix);
+
   return `
     <article class="task-card" data-task-index="${index}">
       <div class="task-card__header">
@@ -67,45 +176,15 @@ function renderTask(task: EditorTask, index: number, total: number) {
         </div>
       </div>
 
-      <div class="task-grid">
-        <div class="field-group">
-          <label for="task-id-${index}">Task id</label>
-          <input id="task-id-${index}" data-task-field="id" value="${escapeHtml(task.id)}" />
-        </div>
-        <div class="field-group">
-          <label for="task-mode-${index}">Execution mode</label>
-          <select id="task-mode-${index}" data-task-mode>
-            <option value="command" ${selected(task.executionMode, 'command')}>command</option>
-            <option value="run" ${selected(task.executionMode, 'run')}>run</option>
-            <option value="pipeline" ${selected(task.executionMode, 'pipeline')}>pipeline</option>
-            <option value="approval-only" ${selected(task.executionMode, 'approval-only')}>approval-only</option>
-          </select>
-        </div>
-
-        ${renderExecutionField('command', task.executionMode, 'command', 'command', task.command, `command-${index}`)}
-        ${renderExecutionField('run', task.executionMode, 'run', 'run', task.run, `run-${index}`)}
-        ${renderExecutionField('pipeline', task.executionMode, 'pipeline', 'pipeline', task.pipeline, `pipeline-${index}`)}
-
-        <div class="field-group">
-          <label for="approval-${index}">Approval prompt</label>
-          <input id="approval-${index}" data-task-field="approvalPrompt" value="${escapeHtml(task.approvalPrompt)}" placeholder="Optional unless approval-only" />
-        </div>
-        <div class="field-group">
-          <label for="stdin-${index}">stdin reference</label>
-          <input id="stdin-${index}" data-task-field="stdin" value="${escapeHtml(task.stdin)}" placeholder="$task_1.stdout" />
-        </div>
-        <div class="field-group">
-          <label for="condition-field-${index}">Conditional field</label>
-          <select id="condition-field-${index}" data-condition-field>
-            <option value="when" ${task.conditionField === 'when' ? 'selected' : ''}>when</option>
-            <option value="condition" ${task.conditionField === 'condition' ? 'selected' : ''}>condition</option>
-          </select>
-        </div>
-        <div class="field-group">
-          <label for="condition-text-${index}">Condition value</label>
-          <input id="condition-text-${index}" data-task-field="conditionText" value="${escapeHtml(task.conditionText)}" placeholder="$approve.approved" />
-        </div>
+      <div class="field-group">
+        <label for="${prefix}-kind">Task type</label>
+        <select id="${prefix}-kind" data-task-kind>
+          <option value="task" ${selected(task.kind, 'task')}>task</option>
+          <option value="for-each" ${selected(task.kind, 'for-each')}>for-each loop</option>
+        </select>
       </div>
+
+      ${body}
     </article>
   `;
 }
@@ -228,7 +307,7 @@ export function renderEditor(root: HTMLElement, state: EditorState, actions: Act
             Tasks render as ordered cards so execution flow stays visible.
           </div>
           <div class="task-stack">
-            ${state.tasks.map((task, index) => renderTask(task, index, state.tasks.length)).join('')}
+            ${state.tasks.map((task, index) => renderTopLevelTask(task, index, state.tasks.length)).join('')}
           </div>
         </section>
       </main>
@@ -325,7 +404,10 @@ export function renderEditor(root: HTMLElement, state: EditorState, actions: Act
 
   for (const card of Array.from(root.querySelectorAll<HTMLElement>('[data-task-index]'))) {
     const index = Number(card.dataset.taskIndex);
+    if (Number.isNaN(index)) continue;
+
     card.querySelector('[data-remove-task]')?.addEventListener('click', () => actions.onRemoveTask(index));
+    card.querySelector('[data-add-child-task]')?.addEventListener('click', () => actions.onAddChildTask(index));
     Array.from(card.querySelectorAll<HTMLElement>('[data-move-task]')).forEach((button) => {
       button.addEventListener('click', () => {
         actions.onMoveTask(index, Number(button.dataset.moveTask) as -1 | 1);
@@ -333,16 +415,54 @@ export function renderEditor(root: HTMLElement, state: EditorState, actions: Act
     });
     Array.from(card.querySelectorAll('[data-task-field]')).forEach((input) => {
       const fieldTarget = input as HTMLInputElement | HTMLTextAreaElement;
+      if (fieldTarget.closest('[data-child-task-index]')) return;
       const field = fieldTarget.dataset.taskField as keyof EditorTask;
       fieldTarget.addEventListener('change', (event) =>
         actions.onTaskFieldChange(index, field, (event.currentTarget as HTMLInputElement | HTMLTextAreaElement).value ?? ''),
       );
     });
+    (card.querySelector('[data-task-kind]') as HTMLSelectElement | null)?.addEventListener('change', (event) => {
+      actions.onTaskKindChange(index, ((event.currentTarget as HTMLSelectElement).value ?? 'task') as EditorTaskKind);
+    });
+    Array.from(card.querySelectorAll('[data-task-mode]')).forEach((element) => {
+      const select = element as HTMLSelectElement;
+      if (select.closest('[data-child-task-index]')) return;
+      select.addEventListener('change', (event) => {
+        actions.onExecutionModeChange(index, ((event.currentTarget as HTMLSelectElement).value ?? 'command') as SupportedExecutionMode);
+      });
+    });
+    Array.from(card.querySelectorAll('[data-condition-field]')).forEach((element) => {
+      const select = element as HTMLSelectElement;
+      if (select.closest('[data-child-task-index]')) return;
+      select.addEventListener('change', (event) => {
+        actions.onConditionFieldChange(index, ((event.currentTarget as HTMLSelectElement).value ?? 'when') as 'when' | 'condition');
+      });
+    });
+  }
+
+  for (const card of Array.from(root.querySelectorAll<HTMLElement>('[data-parent-task-index][data-child-task-index]'))) {
+    const index = Number(card.dataset.parentTaskIndex);
+    const childIndex = Number(card.dataset.childTaskIndex);
+    if (Number.isNaN(index) || Number.isNaN(childIndex)) continue;
+
+    card.querySelector('[data-remove-child-task]')?.addEventListener('click', () => actions.onRemoveChildTask(index, childIndex));
+    Array.from(card.querySelectorAll<HTMLElement>('[data-move-child-task]')).forEach((button) => {
+      button.addEventListener('click', () => {
+        actions.onMoveChildTask(index, childIndex, Number(button.dataset.moveChildTask) as -1 | 1);
+      });
+    });
+    Array.from(card.querySelectorAll('[data-task-field]')).forEach((input) => {
+      const fieldTarget = input as HTMLInputElement | HTMLTextAreaElement;
+      const field = fieldTarget.dataset.taskField as keyof EditorTask;
+      fieldTarget.addEventListener('change', (event) =>
+        actions.onChildTaskFieldChange(index, childIndex, field, (event.currentTarget as HTMLInputElement | HTMLTextAreaElement).value ?? ''),
+      );
+    });
     (card.querySelector('[data-task-mode]') as HTMLSelectElement | null)?.addEventListener('change', (event) => {
-      actions.onExecutionModeChange(index, ((event.currentTarget as HTMLSelectElement).value ?? 'command') as SupportedExecutionMode);
+      actions.onChildExecutionModeChange(index, childIndex, ((event.currentTarget as HTMLSelectElement).value ?? 'command') as SupportedExecutionMode);
     });
     (card.querySelector('[data-condition-field]') as HTMLSelectElement | null)?.addEventListener('change', (event) => {
-      actions.onConditionFieldChange(index, ((event.currentTarget as HTMLSelectElement).value ?? 'when') as 'when' | 'condition');
+      actions.onChildConditionFieldChange(index, childIndex, ((event.currentTarget as HTMLSelectElement).value ?? 'when') as 'when' | 'condition');
     });
   }
 

@@ -6,18 +6,28 @@ import path from 'node:path';
 
 import {
   addArg,
+  addChildTask,
   addEnv,
   addTask,
   createInitialEditorState,
+  setChildTaskExecutionMode,
+  setTaskKind,
   setTaskConditionField,
   setTaskExecutionMode,
   updateArg,
+  updateChildTaskField,
   updateEnv,
   updateTaskField,
 } from '../apps/lobster-studio/src/editor-state.js';
 import { editorStateToWorkflowFile, exportEditorState } from '../apps/lobster-studio/src/export.js';
+import { importWorkflowToEditorState } from '../apps/lobster-studio/src/import.js';
 import { setConditionalField, validateSupportedWorkflowFile } from '../src/workflows/serialize.js';
 import { loadWorkflowFile } from '../src/workflows/file.js';
+import type { WorkflowForEachStep, WorkflowStep } from '../src/workflows/types.js';
+
+function isForEachStep(step: WorkflowStep): step is WorkflowForEachStep {
+  return 'for_each' in step;
+}
 
 test('editor state exports workflow fields and keeps one condition alias per task', () => {
   let state = createInitialEditorState();
@@ -122,4 +132,92 @@ test('conditional field helper emits only one alias at a time', () => {
 
   assert.equal(step.when, '$approve_step.approved');
   assert.equal('condition' in step, false);
+});
+
+test('workflow validation accepts for-each loop steps and rejects nested approvals', () => {
+  const workflow = validateSupportedWorkflowFile({
+    steps: [
+      {
+        id: 'fetch',
+        command: 'node -e "process.stdout.write(JSON.stringify([1,2]))"',
+      },
+      {
+        id: 'loop',
+        for_each: '$fetch.stdout',
+        steps: [
+          {
+            id: 'summarize_one',
+            pipeline: 'json',
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(isForEachStep(workflow.steps[1]) ? workflow.steps[1].for_each : '', '$fetch.stdout');
+
+  assert.throws(
+    () =>
+      validateSupportedWorkflowFile({
+        steps: [
+          {
+            id: 'fetch',
+            command: 'echo ok',
+          },
+          {
+            id: 'loop',
+            for_each: '$fetch.stdout',
+            steps: [
+              {
+                id: 'approve_one',
+                approval: 'nope',
+              },
+            ],
+          },
+        ],
+      }),
+    /cannot define approval/i,
+  );
+});
+
+test('editor state exports and re-imports for-each loop tasks', () => {
+  let state = createInitialEditorState();
+  state = updateTaskField(state, 0, 'id', 'fetch');
+  state = updateTaskField(state, 0, 'command', 'node -e "process.stdout.write(JSON.stringify([{id:1}]))"');
+
+  state = addTask(state);
+  state = setTaskKind(state, 1, 'for-each');
+  state = updateTaskField(state, 1, 'id', 'summaries');
+  state = updateTaskField(state, 1, 'forEach', '$fetch.stdout');
+  state = updateTaskField(state, 1, 'conditionText', '$fetch.approved');
+  state = setTaskConditionField(state, 1, 'condition');
+
+  state = updateChildTaskField(state, 1, 0, 'id', 'summarize_one');
+  state = setChildTaskExecutionMode(state, 1, 0, 'pipeline');
+  state = updateChildTaskField(state, 1, 0, 'pipeline', 'llm.invoke --prompt "Return JSON"');
+
+  state = addChildTask(state, 1);
+  state = updateChildTaskField(state, 1, 1, 'id', 'normalize_one');
+  state = updateChildTaskField(state, 1, 1, 'command', 'node -e "process.stdout.write(process.stdin.read() || \'\')"');
+  state = updateChildTaskField(state, 1, 1, 'stdin', '$summarize_one.stdout');
+
+  const exported = exportEditorState(state).workflow;
+  const loopStep = exported.steps[1];
+  assert.equal(isForEachStep(loopStep), true);
+  if (!isForEachStep(loopStep)) throw new Error('expected loop step');
+  assert.equal(loopStep.for_each, '$fetch.stdout');
+  assert.equal(loopStep.condition, '$fetch.approved');
+  assert.equal(loopStep.steps.length, 2);
+  assert.equal(loopStep.steps[0].pipeline, 'llm.invoke --prompt "Return JSON"');
+  assert.equal(loopStep.steps[1].stdin, '$summarize_one.stdout');
+
+  const imported = importWorkflowToEditorState(exported, {
+    fileName: 'loop-flow.lobster',
+    hasFileBinding: true,
+  });
+
+  assert.equal(imported.tasks[1].kind, 'for-each');
+  assert.equal(imported.tasks[1].forEach, '$fetch.stdout');
+  assert.equal(imported.tasks[1].childTasks.length, 2);
+  assert.equal(imported.tasks[1].childTasks[0].pipeline, 'llm.invoke --prompt "Return JSON"');
 });

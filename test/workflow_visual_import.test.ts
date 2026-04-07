@@ -70,3 +70,31 @@ steps:
   assert.equal(state.tasks[0].executionMode, 'run');
   assert.equal(state.tasks[0].run, 'echo hello');
 });
+
+test('loop workflows import into Studio state with child tasks', () => {
+  const workflow = parseWorkflowFileText(`
+name: loop-flow
+steps:
+  - id: fetch
+    command: node -e "process.stdout.write(JSON.stringify([{id:1}]))"
+  - id: summarize
+    for_each: $fetch.stdout
+    steps:
+      - id: summarize_one
+        pipeline: llm.invoke --prompt "Return JSON"
+      - id: normalize_one
+        command: node -e "process.stdout.write(process.stdin.read() || '')"
+        stdin: $summarize_one.stdout
+`, '.lobster');
+
+  const state = importWorkflowToEditorState(workflow, {
+    fileName: 'loop-flow.lobster',
+    hasFileBinding: true,
+  });
+
+  assert.equal(state.tasks[1].kind, 'for-each');
+  assert.equal(state.tasks[1].forEach, '$fetch.stdout');
+  assert.equal(state.tasks[1].childTasks.length, 2);
+  assert.equal(state.tasks[1].childTasks[0].pipeline, 'llm.invoke --prompt "Return JSON"');
+  assert.equal(state.tasks[1].childTasks[1].stdin, '$summarize_one.stdout');
+});

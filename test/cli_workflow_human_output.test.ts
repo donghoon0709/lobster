@@ -85,6 +85,8 @@ steps:
   assert.match(result.stderr, /- finish \[shell\] succeeded/);
   assert.match(result.stderr, /stdin:/);
   assert.match(result.stderr, /alpha/);
+  assert.doesNotMatch(result.stderr, /original:/i);
+  assert.doesNotMatch(result.stderr, /resolved:/i);
 });
 
 test('human-mode --verbose prints summaries before enriched failure block', async () => {
@@ -114,8 +116,40 @@ steps:
   assert.match(result.stderr, /- first \[shell\] succeeded/);
   assert.match(result.stderr, /- boom \[shell\] failed/);
   assert.match(result.stderr, /Workflow failed at step boom \[shell\]/);
+  assert.doesNotMatch(result.stderr, /original:/i);
+  assert.doesNotMatch(result.stderr, /resolved:/i);
   assert.ok(
     result.stderr.indexOf('Workflow step summary:') < result.stderr.indexOf('Workflow failed at step boom [shell]'),
     result.stderr,
   );
+});
+
+test('human-mode --verbose colors step labels and statuses when FORCE_COLOR is enabled', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-human-verbose-color-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  const workflow = `name: verbose-color
+steps:
+  - id: prepare
+    command: "printf 'alpha'"
+  - id: finish
+    command: "printf 'omega'"
+    stdin: $prepare.stdout
+`;
+
+  await fsp.writeFile(filePath, workflow, 'utf8');
+
+  const result = runLobster([
+    'run',
+    '--file',
+    filePath,
+    '--verbose',
+  ], {
+    env: {
+      FORCE_COLOR: '1',
+    },
+  });
+
+  assert.equal(result.status, 0, `stdout=${result.stdout}\nstderr=${result.stderr}`);
+  assert.match(result.stderr, new RegExp(`${String.raw`\u001B\[1m`}prepare \\[shell\\]${String.raw`\u001B\[0m`}`));
+  assert.match(result.stderr, new RegExp(`${String.raw`\u001B\[32m`}succeeded${String.raw`\u001B\[0m`}`));
 });

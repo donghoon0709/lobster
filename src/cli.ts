@@ -140,7 +140,9 @@ async function handleRun({ argv, registry }) {
         if (verbose && err.trace.length) {
           process.stderr.write(formatWorkflowTrace(err.trace));
         }
-        process.stderr.write(formatWorkflowFailure(err));
+        process.stderr.write(formatWorkflowFailure(err, {
+          includeOriginalResolved: !verbose,
+        }));
         process.exitCode = 1;
         return;
       }
@@ -538,15 +540,11 @@ function writeToolEnvelope(payload) {
 }
 
 function formatWorkflowTrace(trace: WorkflowStepTrace[]) {
+  const color = createColorFormatter(process.stderr, process.env);
   const lines = ['Workflow step summary:', ''];
   for (const entry of trace) {
-    lines.push(`- ${entry.stepId} [${entry.stepType}] ${entry.status}`);
-    if (entry.originalText) {
-      lines.push(`  original: ${entry.originalText}`);
-    }
-    if (entry.resolvedText) {
-      lines.push(`  resolved: ${entry.resolvedText}`);
-    }
+    const stepLabel = color.bold(`${entry.stepId} [${entry.stepType}]`);
+    lines.push(`- ${stepLabel} ${colorStatus(entry.status, color)}`);
     if (entry.stdinPreview) {
       lines.push('  stdin:');
       lines.push(indentBlock(entry.stdinPreview, '    '));
@@ -564,14 +562,18 @@ function formatWorkflowTrace(trace: WorkflowStepTrace[]) {
   return `${lines.join('\n')}`.replace(/\n{3,}$/u, '\n\n');
 }
 
-function formatWorkflowFailure(error: WorkflowExecutionError) {
+function formatWorkflowFailure(
+  error: WorkflowExecutionError,
+  { includeOriginalResolved = true }: { includeOriginalResolved?: boolean } = {},
+) {
+  const color = createColorFormatter(process.stderr, process.env);
   const lines = [
-    `Workflow failed at step ${error.stepId} [${error.stepType}]`,
+    color.red(`Workflow failed at step ${color.bold(`${error.stepId} [${error.stepType}]`)}`),
   ];
-  if (error.originalText) {
+  if (includeOriginalResolved && error.originalText) {
     lines.push(`Original: ${error.originalText}`);
   }
-  if (error.resolvedText) {
+  if (includeOriginalResolved && error.resolvedText) {
     lines.push(`Resolved: ${error.resolvedText}`);
   }
   if (error.stdinPreview) {
@@ -591,6 +593,38 @@ function indentBlock(text: string, indent: string) {
     .split('\n')
     .map((line) => `${indent}${line}`)
     .join('\n');
+}
+
+function colorStatus(
+  status: WorkflowStepTrace['status'],
+  color: ReturnType<typeof createColorFormatter>,
+) {
+  if (status === 'succeeded' || status === 'approved') return color.green(status);
+  if (status === 'failed') return color.red(status);
+  return status;
+}
+
+function createColorFormatter(
+  stream: NodeJS.WritableStream,
+  env: Record<string, string | undefined>,
+) {
+  const enabled = shouldUseColor(stream, env);
+  const wrap = (code: string) => (value: string) => enabled ? `\u001B[${code}m${value}\u001B[0m` : value;
+  return {
+    bold: wrap('1'),
+    green: wrap('32'),
+    red: wrap('31'),
+  };
+}
+
+function shouldUseColor(
+  stream: NodeJS.WritableStream,
+  env: Record<string, string | undefined>,
+) {
+  const forceColor = env.FORCE_COLOR?.trim();
+  if (forceColor && forceColor !== '0') return true;
+  if (env.NO_COLOR !== undefined) return false;
+  return Boolean((stream as NodeJS.WriteStream).isTTY);
 }
 
 function helpText() {

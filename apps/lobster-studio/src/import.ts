@@ -1,7 +1,9 @@
 import type {
   WorkflowApproval,
   WorkflowArgDefinition,
+  WorkflowExecutionStep,
   WorkflowFile,
+  WorkflowForEachStep,
   WorkflowStep,
 } from '../../../src/workflows/types.js';
 import {
@@ -9,6 +11,7 @@ import {
   type ArgEntry,
   type EditorState,
   type EditorTask,
+  type EditorTaskKind,
   type EditorTaskPassthrough,
 } from './editor-state.js';
 
@@ -56,7 +59,15 @@ function importApproval(
   };
 }
 
-function importTask(step: WorkflowStep, index: number): EditorTask {
+function isForEachStep(step: WorkflowStep): step is WorkflowForEachStep {
+  return 'for_each' in step;
+}
+
+function importLeafTask(
+  step: WorkflowExecutionStep,
+  index: number,
+  kind: EditorTaskKind = 'task',
+): EditorTask {
   const executionMode = step.run !== undefined
     ? 'run'
     : step.command !== undefined
@@ -68,14 +79,17 @@ function importTask(step: WorkflowStep, index: number): EditorTask {
   const hasWhen = step.when !== undefined;
   return {
     id: step.id || `task_${index + 1}`,
+    kind,
     executionMode,
     run: typeof step.run === 'string' ? step.run : '',
     command: typeof step.command === 'string' ? step.command : '',
     pipeline: typeof step.pipeline === 'string' ? step.pipeline : '',
     approvalPrompt,
     stdin: stringifyEditorValue(step.stdin),
+    forEach: '',
     conditionField: hasWhen ? 'when' : 'condition',
     conditionText: stringifyEditorValue(hasWhen ? step.when : step.condition),
+    childTasks: [],
     passthrough: {
       ...passthrough,
       cwd: step.cwd,
@@ -84,6 +98,30 @@ function importTask(step: WorkflowStep, index: number): EditorTask {
       rawConditionValue: hasWhen ? step.when : step.condition,
     },
   };
+}
+
+function importTask(step: WorkflowStep, index: number): EditorTask {
+  if (isForEachStep(step)) {
+    const hasWhen = step.when !== undefined;
+    return {
+      id: step.id || `loop_${index + 1}`,
+      kind: 'for-each',
+      executionMode: 'command',
+      run: '',
+      command: '',
+      pipeline: '',
+      approvalPrompt: '',
+      stdin: '',
+      forEach: step.for_each,
+      conditionField: hasWhen ? 'when' : 'condition',
+      conditionText: stringifyEditorValue(hasWhen ? step.when : step.condition),
+      childTasks: step.steps.map((child, childIndex) => importLeafTask(child, childIndex)),
+      passthrough: {
+        rawConditionValue: hasWhen ? step.when : step.condition,
+      },
+    };
+  }
+  return importLeafTask(step, index);
 }
 
 export function importWorkflowFile(workflow: WorkflowFile, fileName = 'workflow.lobster'): EditorState {

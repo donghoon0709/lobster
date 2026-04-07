@@ -1,16 +1,23 @@
 import {
   addArg,
+  addChildTask,
   addEnv,
   addTask,
   createInitialEditorState,
+  moveChildTask,
   moveTask,
   removeArg,
+  removeChildTask,
   removeEnv,
   removeTask,
+  setChildTaskConditionField,
+  setChildTaskExecutionMode,
   setTaskConditionField,
   setTaskExecutionMode,
+  setTaskKind,
   setWorkflowField,
   updateArg,
+  updateChildTaskField,
   updateEnv,
   updateTaskField,
   type EditorState,
@@ -250,24 +257,52 @@ function rerender() {
       state = withDirtyStatus(addTask(state));
       rerender();
     },
+    onAddChildTask(index) {
+      state = withDirtyStatus(addChildTask(state, index));
+      rerender();
+    },
     onRemoveTask(index) {
       state = withDirtyStatus(removeTask(state, index));
+      rerender();
+    },
+    onRemoveChildTask(index, childIndex) {
+      state = withDirtyStatus(removeChildTask(state, index, childIndex));
       rerender();
     },
     onMoveTask(index, direction) {
       state = withDirtyStatus(moveTask(state, index, direction));
       rerender();
     },
+    onMoveChildTask(index, childIndex, direction) {
+      state = withDirtyStatus(moveChildTask(state, index, childIndex, direction));
+      rerender();
+    },
     onTaskFieldChange(index, field, value) {
       state = withDirtyStatus(updateTaskField(state, index, field, value));
+      rerender();
+    },
+    onChildTaskFieldChange(index, childIndex, field, value) {
+      state = withDirtyStatus(updateChildTaskField(state, index, childIndex, field, value));
+      rerender();
+    },
+    onTaskKindChange(index, value) {
+      state = withDirtyStatus(setTaskKind(state, index, value));
       rerender();
     },
     onExecutionModeChange(index, value) {
       state = withDirtyStatus(setTaskExecutionMode(state, index, value));
       rerender();
     },
+    onChildExecutionModeChange(index, childIndex, value) {
+      state = withDirtyStatus(setChildTaskExecutionMode(state, index, childIndex, value));
+      rerender();
+    },
     onConditionFieldChange(index, value) {
       state = withDirtyStatus(setTaskConditionField(state, index, value));
+      rerender();
+    },
+    onChildConditionFieldChange(index, childIndex, value) {
+      state = withDirtyStatus(setChildTaskConditionField(state, index, childIndex, value));
       rerender();
     },
     onCopyExport(text) {

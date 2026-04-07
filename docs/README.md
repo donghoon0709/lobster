@@ -50,6 +50,13 @@ steps:
 
 See [`lobster-file-syntax.md`](./lobster-file-syntax.md) for what each field means and which forms are actually supported.
 
+That syntax guide also covers the shipped `for_each` loop form for sequential per-item processing over a previous step's JSON-array stdout, including:
+
+- how the current loop item is delivered through `stdin`
+- the first-child explicit-`stdin` override rule
+- what child-step refs are visible inside a loop
+- what downstream top-level steps can consume from the aggregate loop result
+
 ## Source-of-truth policy
 
 These docs describe **implemented behavior only**. The source files that matter most are:
